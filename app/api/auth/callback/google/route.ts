@@ -36,7 +36,6 @@ export async function GET(req: NextRequest) {
       );
     }
 
-    // SAVE TO SUPABASE
     const { error } = await supabase.from("google_connections").upsert(
       {
         google_email: userEmail,
