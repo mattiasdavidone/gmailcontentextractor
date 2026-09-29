@@ -437,27 +437,28 @@ export async function appendContact(
 ) {
   const safeTitle = tabName.replace(/'/g, "''");
 
-  await withGoogleRetry(() =>
-    sheets.spreadsheets.values.append({
-      spreadsheetId,
-      range: "'" + safeTitle + "'!A:I",
-      valueInputOption: "USER_ENTERED",
-      insertDataOption: "INSERT_ROWS",
-      requestBody: {
-        values: [
-          [
-            contact.first_name || "",
-            contact.last_name || "",
-            contact.email || "",
-            contact.phone || "",
-            contact.fax || "",
-            contact.title || "",
-            contact.address || "",
-            contact.source || "",
-            contact.message_id || "",
-          ],
+  // Do not automatically replay an append after a transient 503. The
+  // write is non-idempotent; writeContactToSheet marks the contact as pending
+  // first and can verify the Message ID on the next attempt before appending.
+  await sheets.spreadsheets.values.append({
+    spreadsheetId,
+    range: "'" + safeTitle + "'!A:I",
+    valueInputOption: "USER_ENTERED",
+    insertDataOption: "INSERT_ROWS",
+    requestBody: {
+      values: [
+        [
+          contact.first_name || "",
+          contact.last_name || "",
+          contact.email || "",
+          contact.phone || "",
+          contact.fax || "",
+          contact.title || "",
+          contact.address || "",
+          contact.source || "",
+          contact.message_id || "",
         ],
-      },
-    })
-  );
+      ],
+    },
+  });
 }
