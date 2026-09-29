@@ -4,10 +4,10 @@ on:
   push:
     branches:
       - fix/runtime-processing-architecture
-  pull_request:
-    branches:
-      - main
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -18,5 +18,17 @@ jobs:
         with:
           node-version: 20
           cache: npm
+      - run: npm install
+      - name: Commit refreshed lockfile
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git diff --quiet -- package-lock.json; then
+            echo "Lockfile is already in sync."
+          else
+            git add package-lock.json
+            git commit -m "Update package lockfile"
+            git push
+          fi
       - run: npm ci
       - run: npm run build
