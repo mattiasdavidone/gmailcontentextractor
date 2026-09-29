@@ -618,8 +618,7 @@ export default function Dashboard() {
                   Clear scanned status
                 </div>
                 <p className="mt-1 max-w-2xl text-[12px] text-[#8f7070]">
-                  This removes the AI-Scanned label from inbox emails and clears their processing history.
-                  They will be eligible to run again, which can increase API and OpenAI costs and may create duplicate rows in the Sheet.
+                  This clears processing history so inbox emails can be scanned again. Existing extracted contacts are preserved, so rerunning will not create duplicate contact rows.
                 </p>
               </div>
 
@@ -639,8 +638,7 @@ export default function Dashboard() {
                   Are you sure?
                 </p>
                 <p className="mt-1 text-[12px] text-[#8f7070]">
-                  Every inbox email currently marked as scanned will become eligible again.
-                  Processing them again may consume additional API credits and append duplicate contacts to the Sheet.
+                  Inbox emails will become eligible for another scan. Existing extracted contacts stay in the database, so known contacts will be skipped instead of appended again.
                 </p>
 
                 <div className="mt-3 flex flex-wrap gap-2">
