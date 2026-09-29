@@ -292,7 +292,7 @@ async function findExistingContactByEmail(supabase, connectionId, email) {
   const { data, error } = await supabase
     .from("extracted_contacts")
     .select(
-      "id, email, first_name, last_name, phone, title, address, normalized_email, sheet_written, sheet_written_to, message_id"
+      "id, email, first_name, last_name, phone, fax, title, address, normalized_email, sheet_written, sheet_written_to, message_id"
     )
     .eq("connection_id", connectionId)
     .eq("normalized_email", normalized)
