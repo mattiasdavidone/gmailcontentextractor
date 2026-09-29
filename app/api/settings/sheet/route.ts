@@ -220,7 +220,7 @@ export async function POST(req: NextRequest) {
       });
     }
 
-    const sheets = google.sheets({ version: "v4", auth });
+    const sheets = google.sheets({ version: "v4", auth, retry: false });
 
     const contactsTab = await ensureContactsTab(
       sheets,
