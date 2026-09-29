@@ -9,7 +9,7 @@ export const CONTACT_HEADERS = [
   "Title",
   "Address",
   "Source",
-] as const;
+];
 
 type SheetsClient = ReturnType<typeof google.sheets>;
 
