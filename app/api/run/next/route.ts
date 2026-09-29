@@ -95,6 +95,85 @@ async function getScanLabel(gmail: any) {
   return created.data.id;
 }
 
+function normalizeEmail(value: string) {
+  return value.trim().toLowerCase();
+}
+
+function extractEmailAddress(fromHeader: string) {
+  const angleMatch = fromHeader.match(/<([^>]+)>/);
+  const raw = angleMatch?.[1] || fromHeader;
+  const emailMatch = raw.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
+  return emailMatch ? normalizeEmail(emailMatch[0]) : "";
+}
+
+function normalizePersonValue(value: string | null | undefined) {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ");
+}
+
+function normalizePhone(value: string | null | undefined) {
+  return String(value || "").replace(/\D/g, "");
+}
+
+async function findExistingContactInSheet(
+  sheets: ReturnType<typeof google.sheets>,
+  spreadsheetId: string,
+  candidate: {
+    email?: string | null;
+    firstName?: string | null;
+    lastName?: string | null;
+    phone?: string | null;
+  }
+) {
+  const response = await sheets.spreadsheets.values.get({
+    spreadsheetId,
+    range: "Contacts!A2:H",
+    majorDimension: "ROWS",
+  });
+
+  const rows = response.data.values || [];
+  const candidateEmail = normalizeEmail(candidate.email || "");
+  const candidateFirst = normalizePersonValue(candidate.firstName);
+  const candidateLast = normalizePersonValue(candidate.lastName);
+  const candidatePhone = normalizePhone(candidate.phone);
+
+  for (const row of rows) {
+    const rowEmail = normalizeEmail(row[2] || "");
+
+    if (candidateEmail && rowEmail && candidateEmail === rowEmail) {
+      return {
+        found: true,
+        reason: "email" as const,
+      };
+    }
+
+    if (!candidateEmail && candidateFirst && candidateLast) {
+      const rowFirst = normalizePersonValue(row[0]);
+      const rowLast = normalizePersonValue(row[1]);
+      const rowPhone = normalizePhone(row[3]);
+
+      if (
+        rowFirst === candidateFirst &&
+        rowLast === candidateLast &&
+        ((!candidatePhone && !rowPhone) ||
+          (candidatePhone && rowPhone && candidatePhone === rowPhone))
+      ) {
+        return {
+          found: true,
+          reason: "name" as const,
+        };
+      }
+    }
+  }
+
+  return {
+    found: false,
+    reason: null,
+  };
+}
+
 async function ensureContactsSheet(
   sheets: ReturnType<typeof google.sheets>,
   spreadsheetId: string
@@ -360,7 +439,10 @@ export async function POST(req: Request) {
         });
       }
 
-      if (existingLog.status === "contact_extracted") {
+      if (
+        existingLog.status === "contact_extracted" ||
+        existingLog.status === "contact_already_in_sheet"
+      ) {
         const { data: existingContact, error: existingContactError } =
           await supabase
             .from("extracted_contacts")
@@ -385,7 +467,21 @@ export async function POST(req: Request) {
 
         let addedToThisSheet = false;
 
-        if (existingContact.sheet_written_to !== connection.target_sheet_id) {
+        const existingSheetContact = await findExistingContactInSheet(
+          sheets,
+          connection.target_sheet_id,
+          {
+            email: existingContact.email || extractEmailAddress(fromHeader),
+            firstName: existingContact.first_name,
+            lastName: existingContact.last_name,
+            phone: existingContact.phone,
+          }
+        );
+
+        if (
+          !existingSheetContact.found &&
+          existingContact.sheet_written_to !== connection.target_sheet_id
+        ) {
           await assertRunActive(supabase, runId, user.id);
 
           stage = "syncing existing contact to Google Sheet";
@@ -477,6 +573,70 @@ export async function POST(req: Request) {
     }
 
     await assertRunActive(supabase, runId, user.id);
+
+    stage = "checking Google Sheet for existing contact";
+
+    const senderEmail = extractEmailAddress(fromHeader);
+
+    if (senderEmail) {
+      const existingSheetContact = await findExistingContactInSheet(
+        sheets,
+        connection.target_sheet_id,
+        { email: senderEmail }
+      );
+
+      if (existingSheetContact.found) {
+        await assertRunActive(supabase, runId, user.id);
+
+        stage = "recording contact already in Google Sheet";
+
+        const { error: existingSheetLogError } = await supabase
+          .from("email_logs")
+          .upsert(
+            {
+              connection_id: connection.id,
+              run_id: runId,
+              message_id: messageRef.id,
+              status: "contact_already_in_sheet",
+            },
+            { onConflict: "connection_id,message_id" }
+          );
+
+        if (existingSheetLogError) {
+          throw new Error(
+            `Could not record existing Sheet contact: ${existingSheetLogError.message}`
+          );
+        }
+
+        await gmail.users.messages.modify({
+          userId: "me",
+          id: messageRef.id,
+          requestBody: { addLabelIds: [labelId] },
+        });
+
+        const { data: currentRun } = await supabase
+          .from("tool_runs")
+          .select("emails_scanned, bots_filtered, contacts_extracted")
+          .eq("id", runId)
+          .single();
+
+        await supabase
+          .from("tool_runs")
+          .update({
+            emails_scanned: (currentRun?.emails_scanned || 0) + 1,
+          })
+          .eq("id", runId)
+          .eq("user_id", user.id);
+
+        return NextResponse.json({
+          done: false,
+          scanned: 1,
+          botsFiltered: 0,
+          contactsExtracted: 0,
+          activity: `Already in this Sheet: ${fromHeader}`,
+        });
+      }
+    }
 
     stage = "classifying sender";
 
@@ -601,6 +761,86 @@ export async function POST(req: Request) {
 
     if (!contact.sheet_written) {
       await assertRunActive(supabase, runId, user.id);
+
+      stage = "checking Google Sheet for duplicate contact";
+
+      const existingSheetContact = await findExistingContactInSheet(
+        sheets,
+        connection.target_sheet_id,
+        {
+          email: contact.email || senderEmail,
+          firstName: contact.first_name,
+          lastName: contact.last_name,
+          phone: contact.phone,
+        }
+      );
+
+      if (existingSheetContact.found) {
+        const { error: markExistingError } = await supabase
+          .from("extracted_contacts")
+          .update({
+            sheet_written: true,
+            sheet_written_to: connection.target_sheet_id,
+          })
+          .eq("id", contact.id)
+          .eq("connection_id", connection.id);
+
+        if (markExistingError) {
+          throw new Error(
+            `Could not mark existing Sheet contact: ${markExistingError.message}`
+          );
+        }
+
+        await assertRunActive(supabase, runId, user.id);
+
+        stage = "recording processed email";
+
+        const { error: existingEmailLogError } = await supabase
+          .from("email_logs")
+          .upsert(
+            {
+              connection_id: connection.id,
+              run_id: runId,
+              message_id: messageRef.id,
+              status: "contact_already_in_sheet",
+            },
+            { onConflict: "connection_id,message_id" }
+          );
+
+        if (existingEmailLogError) {
+          throw new Error(
+            `Could not record existing Sheet contact: ${existingEmailLogError.message}`
+          );
+        }
+
+        await gmail.users.messages.modify({
+          userId: "me",
+          id: messageRef.id,
+          requestBody: { addLabelIds: [labelId] },
+        });
+
+        const { data: currentRun } = await supabase
+          .from("tool_runs")
+          .select("emails_scanned, bots_filtered, contacts_extracted")
+          .eq("id", runId)
+          .single();
+
+        await supabase
+          .from("tool_runs")
+          .update({
+            emails_scanned: (currentRun?.emails_scanned || 0) + 1,
+          })
+          .eq("id", runId)
+          .eq("user_id", user.id);
+
+        return NextResponse.json({
+          done: false,
+          scanned: 1,
+          botsFiltered: 0,
+          contactsExtracted: 0,
+          activity: `Already in this Sheet: ${fromHeader}`,
+        });
+      }
 
       stage = "writing contact to Google Sheet";
 
