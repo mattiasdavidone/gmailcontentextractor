@@ -1,19 +1,18 @@
 import { NextResponse } from "next/server";
-import { createClient } from "@supabase/supabase-js";
 import { getCurrentUser } from "@/lib/auth";
 import { createGmailClient, listGmailMessageIds } from "@/lib/google-gmail";
+import {
+  acquireRunWorker,
+  createRunDb,
+  createWorkerId,
+  markRunIngestionComplete,
+  releaseRunWorker,
+} from "@/lib/run-worker";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 
 const MAX_BATCH = 1000;
-
-function db() {
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
-  if (!url || !key) throw new Error("Supabase environment variables are not configured.");
-  return createClient(url, key);
-}
 
 export async function POST(req: Request) {
   const user = await getCurrentUser();
@@ -23,19 +22,38 @@ export async function POST(req: Request) {
   const runId = typeof body?.runId === "string" ? body.runId : "";
   if (!runId) return NextResponse.json({ error: "runId is required." }, { status: 400 });
 
-  const supabase = db();
+  const supabase = createRunDb();
+  const workerId = createWorkerId("gmail-ingest");
+  let leaseAcquired = false;
 
   try {
     const { data: run, error: runError } = await supabase
       .from("tool_runs")
-      .select("id, connection_id, status, gmail_query, gmail_page_token, target_email_count, queued_message_count")
+      .select(
+        "id, connection_id, status, gmail_query, gmail_page_token, target_email_count, queued_message_count, ingestion_complete"
+      )
       .eq("id", runId)
       .eq("user_id", user.id)
       .maybeSingle();
 
     if (runError) throw new Error("Could not load run: " + runError.message);
     if (!run) return NextResponse.json({ error: "Run not found." }, { status: 404 });
-    if (run.status !== "running") return NextResponse.json({ error: "Run is not active." }, { status: 409 });
+    if (run.status !== "running") {
+      return NextResponse.json({ error: "Run is not active." }, { status: 409 });
+    }
+    if (run.ingestion_complete) {
+      return NextResponse.json({
+        ok: true,
+        runId: run.id,
+        queuedMessageCount: Number(run.queued_message_count || 0),
+        addedThisCall: 0,
+        nextPageToken: null,
+        ingestionComplete: true,
+      });
+    }
+
+    await acquireRunWorker(supabase, run.id, workerId);
+    leaseAcquired = true;
 
     const { data: connection, error: connectionError } = await supabase
       .from("google_connections")
@@ -53,19 +71,22 @@ export async function POST(req: Request) {
     const query = run.gmail_query || "in:inbox";
 
     let token = run.gmail_page_token || undefined;
+    let queuedCount = Number(run.queued_message_count || 0);
     let addedTotal = 0;
     let pages = 0;
+    let reachedEnd = false;
 
-    while ((run.queued_message_count || 0) + addedTotal < target && pages < 3) {
+    while (queuedCount < target && pages < 3) {
       const page = await listGmailMessageIds(gmail, query, token);
       pages += 1;
 
       if (!page.messageIds.length) {
         token = undefined;
+        reachedEnd = true;
         break;
       }
 
-      const remaining = target - ((run.queued_message_count || 0) + addedTotal);
+      const remaining = target - queuedCount;
       const ids = page.messageIds.slice(0, remaining);
 
       const { data: added, error } = await supabase.rpc("enqueue_run_email_jobs", {
@@ -74,15 +95,23 @@ export async function POST(req: Request) {
         p_message_ids: ids,
       });
 
-      if (error) throw new Error("Could not enqueue Gmail messages: " + error.message);
+      if (error) {
+        throw new Error("Could not enqueue Gmail messages: " + error.message);
+      }
 
       addedTotal += Number(added || 0);
+      queuedCount += Number(added || 0);
       token = page.nextPageToken || undefined;
 
-      if (!page.nextPageToken || ids.length < remaining) break;
+      if (!page.nextPageToken || ids.length < remaining) {
+        reachedEnd = !page.nextPageToken;
+        break;
+      }
     }
 
-    const { data: checkpoint, error: checkpointError } = await supabase
+    const shouldClose = queuedCount >= target || reachedEnd;
+
+    const { error: checkpointError } = await supabase
       .from("tool_runs")
       .update({
         gmail_page_token: token || null,
@@ -91,18 +120,23 @@ export async function POST(req: Request) {
       })
       .eq("id", run.id)
       .eq("user_id", user.id)
-      .eq("status", "running")
-      .select("queued_message_count, gmail_page_token")
-      .single();
+      .eq("status", "running");
 
-    if (checkpointError) throw new Error("Could not checkpoint Gmail ingestion: " + checkpointError.message);
+    if (checkpointError) {
+      throw new Error("Could not checkpoint Gmail ingestion: " + checkpointError.message);
+    }
+
+    if (shouldClose) {
+      await markRunIngestionComplete(supabase, run.id);
+    }
 
     return NextResponse.json({
       ok: true,
       runId: run.id,
-      queuedMessageCount: checkpoint.queued_message_count,
+      queuedMessageCount: queuedCount,
       addedThisCall: addedTotal,
-      nextPageToken: checkpoint.gmail_page_token,
+      nextPageToken: token || null,
+      ingestionComplete: shouldClose,
     });
   } catch (error) {
     console.error("Gmail ingestion failed", error);
@@ -110,5 +144,11 @@ export async function POST(req: Request) {
       { error: error instanceof Error ? error.message : "Gmail ingestion failed." },
       { status: 500 }
     );
+  } finally {
+    if (leaseAcquired) {
+      await releaseRunWorker(supabase, runId, workerId).catch((error) => {
+        console.error("Failed to release Gmail ingestion worker lease", error);
+      });
+    }
   }
 }
