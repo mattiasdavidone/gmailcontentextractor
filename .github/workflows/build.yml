@@ -35,6 +35,12 @@ jobs:
             git commit -m "Update package lockfile"
             git push
           fi
+      - name: Upload refreshed lockfile
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: refreshed-lockfile
+          path: package-lock.json
       - run: npm ci
       - name: Build with log capture
         id: build
