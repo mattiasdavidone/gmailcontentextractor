@@ -5,19 +5,27 @@ import { getCurrentUser } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 
+function redirectWithError(req: NextRequest, message: string) {
+  const url = new URL("/", req.url);
+  url.searchParams.set("google_error", "1");
+  url.searchParams.set(
+    "google_error_message",
+    message.slice(0, 500)
+  );
+  return NextResponse.redirect(url);
+}
+
 export async function GET(req: NextRequest) {
   const user = await getCurrentUser();
 
   if (!user) {
-    const errorUrl = new URL("/", req.url);
-    errorUrl.searchParams.set("google_error", "1");
-    return NextResponse.redirect(errorUrl);
+    return NextResponse.redirect(new URL("/login", req.url));
   }
 
   const code = req.nextUrl.searchParams.get("code");
 
   if (!code) {
-    return NextResponse.redirect(new URL("/?connected=1", req.url));
+    return redirectWithError(req, "Google did not return an authorization code.");
   }
 
   const redirectUri = new URL(
@@ -36,7 +44,7 @@ export async function GET(req: NextRequest) {
 
     if (!tokens.refresh_token) {
       throw new Error(
-        "Google did not return a refresh token. Reconnect Gmail and approve the requested permissions."
+        "Google did not return a refresh token. Use Reconnect and approve the requested Gmail permissions."
       );
     }
 
@@ -59,32 +67,100 @@ export async function GET(req: NextRequest) {
       process.env.SUPABASE_SERVICE_ROLE_KEY!
     );
 
-    // Claim a legacy connection created before account support existed.
-    await supabase
+    // First attach a legacy connection created before app accounts existed.
+    const { data: legacyConnection, error: legacyLookupError } = await supabase
       .from("google_connections")
-      .update({ user_id: user.id })
+      .select("id, user_id")
       .eq("google_email", googleEmail)
-      .is("user_id", null);
+      .is("user_id", null)
+      .limit(1)
+      .maybeSingle();
 
-    const { error } = await supabase
-      .from("google_connections")
-      .upsert(
-        {
-          user_id: user.id,
-          google_email: googleEmail,
-          refresh_token: tokens.refresh_token,
-          is_active: true,
-        },
-        { onConflict: "user_id,google_email" }
+    if (legacyLookupError) {
+      throw new Error(
+        "Could not look up the existing Gmail connection: " +
+          legacyLookupError.message
       );
-
-    if (error) {
-      throw new Error(error.message);
     }
 
-    return NextResponse.redirect(new URL("/", req.url));
+    if (legacyConnection) {
+      const { error: claimError } = await supabase
+        .from("google_connections")
+        .update({
+          user_id: user.id,
+          refresh_token: tokens.refresh_token,
+          is_active: true,
+        })
+        .eq("id", legacyConnection.id);
+
+      if (claimError) {
+        throw new Error(
+          "Could not attach the Gmail connection to your account: " +
+            claimError.message
+        );
+      }
+    } else {
+      // Avoid depending on a database-side ON CONFLICT definition. This also
+      // keeps the reconnect path working if the migration was applied to an
+      // older google_connections table without the new composite constraint.
+      const { data: existingConnection, error: existingLookupError } =
+        await supabase
+          .from("google_connections")
+          .select("id")
+          .eq("user_id", user.id)
+          .eq("google_email", googleEmail)
+          .limit(1)
+          .maybeSingle();
+
+      if (existingLookupError) {
+        throw new Error(
+          "Could not look up your Gmail connection: " +
+            existingLookupError.message
+        );
+      }
+
+      if (existingConnection) {
+        const { error: updateError } = await supabase
+          .from("google_connections")
+          .update({
+            refresh_token: tokens.refresh_token,
+            is_active: true,
+          })
+          .eq("id", existingConnection.id)
+          .eq("user_id", user.id);
+
+        if (updateError) {
+          throw new Error(
+            "Could not update the Gmail connection: " + updateError.message
+          );
+        }
+      } else {
+        const { error: insertError } = await supabase
+          .from("google_connections")
+          .insert({
+            user_id: user.id,
+            google_email: googleEmail,
+            refresh_token: tokens.refresh_token,
+            is_active: true,
+          });
+
+        if (insertError) {
+          throw new Error(
+            "Could not save the Gmail connection: " + insertError.message
+          );
+        }
+      }
+    }
+
+    const successUrl = new URL("/", req.url);
+    successUrl.searchParams.set("connected", "1");
+    return NextResponse.redirect(successUrl);
   } catch (error) {
     console.error("Google callback failed", error);
-    return NextResponse.redirect(new URL("/login", req.url));
+
+    return redirectWithError(
+      req,
+      error instanceof Error ? error.message : "Google connection failed."
+    );
   }
 }
