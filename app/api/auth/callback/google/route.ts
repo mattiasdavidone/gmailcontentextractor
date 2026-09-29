@@ -1,21 +1,21 @@
 import { NextRequest, NextResponse } from "next/server";
 import { google } from "googleapis";
 import { createClient } from "@supabase/supabase-js";
+import { getCurrentUser } from "@/lib/auth";
 
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY!
-);
+export const dynamic = "force-dynamic";
 
 export async function GET(req: NextRequest) {
-  const searchParams = req.nextUrl.searchParams;
-  const code = searchParams.get("code");
+  const user = await getCurrentUser();
+
+  if (!user) {
+    return NextResponse.redirect(new URL("/login", req.url));
+  }
+
+  const code = req.nextUrl.searchParams.get("code");
 
   if (!code) {
-    return NextResponse.json(
-      { error: "NO CODE PROVIDED" },
-      { status: 400 }
-    );
+    return NextResponse.redirect(new URL("/", req.url));
   }
 
   const redirectUri = new URL(
@@ -31,6 +31,13 @@ export async function GET(req: NextRequest) {
 
   try {
     const { tokens } = await oauth2Client.getToken(code);
+
+    if (!tokens.refresh_token) {
+      throw new Error(
+        "Google did not return a refresh token. Reconnect Gmail and approve the requested permissions."
+      );
+    }
+
     oauth2Client.setCredentials(tokens);
 
     const oauth2 = google.oauth2({
@@ -39,37 +46,36 @@ export async function GET(req: NextRequest) {
     });
 
     const userInfo = await oauth2.userinfo.get();
-    const userEmail = userInfo.data.email;
+    const googleEmail = userInfo.data.email;
 
-    if (!userEmail || !tokens.refresh_token) {
-      return NextResponse.json(
-        { error: "FAILED TO RETRIEVE REFRESH TOKEN OR EMAIL" },
-        { status: 400 }
-      );
+    if (!googleEmail) {
+      throw new Error("Google did not return an email address.");
     }
+
+    const supabase = createClient(
+      process.env.NEXT_PUBLIC_SUPABASE_URL!,
+      process.env.SUPABASE_SERVICE_ROLE_KEY!
+    );
 
     const { error } = await supabase
       .from("google_connections")
       .upsert(
         {
-          google_email: userEmail,
+          user_id: user.id,
+          google_email: googleEmail,
           refresh_token: tokens.refresh_token,
           is_active: true,
         },
-        { onConflict: "google_email" }
+        { onConflict: "user_id,google_email" }
       );
 
     if (error) {
-      throw error;
+      throw new Error(error.message);
     }
 
-    return NextResponse.redirect(
-      new URL("/?status=connected", req.url)
-    );
-  } catch (err: any) {
-    return NextResponse.json(
-      { error: err.message },
-      { status: 500 }
-    );
+    return NextResponse.redirect(new URL("/", req.url));
+  } catch (error) {
+    console.error("Google callback failed", error);
+    return NextResponse.redirect(new URL("/login", req.url));
   }
 }
