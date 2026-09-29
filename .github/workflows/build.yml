@@ -3,6 +3,7 @@ name: Build check
 on:
   push:
     branches:
+      - main
       - fix/runtime-processing-architecture
       - fix/final-processing-hardening
   pull_request:
@@ -23,6 +24,8 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm install
+      - name: Apply available dependency fixes
+        run: npm audit fix --package-lock-only --force || true
       - name: Commit refreshed lockfile
         if: github.event_name == 'push'
         run: |
