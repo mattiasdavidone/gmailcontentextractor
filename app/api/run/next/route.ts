@@ -190,8 +190,6 @@ export async function POST() {
       throw new Error("The Gmail message does not contain a From address.");
     }
 
-    stage = "classifying sender";
-
     stage = "checking scan label";
 
     const labelId = await getScanLabel(gmail);
