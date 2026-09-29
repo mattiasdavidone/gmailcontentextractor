@@ -1,7 +1,6 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { google } from "googleapis";
-import OpenAI from "openai";
 import { getCurrentUser } from "@/lib/auth";
 import {
   appendContact,
@@ -10,25 +9,10 @@ import {
   hasMessageIdInSheet,
   normalizeEmail,
 } from "@/lib/google-sheets";
+import { analyzeEmailForContact } from "@/lib/contact-ai";
 
 export const maxDuration = 60;
 export const dynamic = "force-dynamic";
-
-let openaiClient;
-
-function getOpenAI() {
-  if (!openaiClient) {
-    const apiKey = process.env.OPENAI_API_KEY;
-
-    if (!apiKey) {
-      throw new Error("OPENAI_API_KEY is not configured.");
-    }
-
-    openaiClient = new OpenAI({ apiKey });
-  }
-
-  return openaiClient;
-}
 
 function createSupabase() {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
@@ -98,16 +82,6 @@ function isMissingSheetError(error) {
         message.includes("range not found") ||
         message.includes("not found")))
   );
-}
-
-function parseJson(value) {
-  if (!value) return {};
-
-  try {
-    return JSON.parse(value);
-  } catch {
-    throw new Error("OpenAI returned invalid JSON.");
-  }
 }
 
 async function assertRunActive(supabase, runId, userId) {
@@ -260,7 +234,14 @@ async function loadMessage(gmail, messageId) {
     userId: "me",
     id: messageId,
     format: "metadata",
-    metadataHeaders: ["From", "Subject"],
+    metadataHeaders: [
+      "From",
+      "Subject",
+      "Auto-Submitted",
+      "Precedence",
+      "List-Unsubscribe",
+      "X-Auto-Response-Suppress",
+    ],
   });
 }
 
@@ -621,55 +602,6 @@ async function writeContactToSheet(
   );
 }
 
-async function classifySender(sender) {
-  const response = await getOpenAI().chat.completions.create({
-    model: "gpt-4o-mini",
-    messages: [
-      {
-        role: "system",
-        content:
-          'Analyze the sender email address. Return strictly JSON: {"is_human": boolean}.',
-      },
-      {
-        role: "user",
-        content: "Sender: " + sender,
-      },
-    ],
-    response_format: { type: "json_object" },
-    temperature: 0,
-  });
-
-  const parsed = parseJson(response.choices[0]?.message?.content);
-  return parsed.is_human === true;
-}
-
-async function extractContact(sender, subject, snippet) {
-  const response = await getOpenAI().chat.completions.create({
-    model: "gpt-4o-mini",
-    messages: [
-      {
-        role: "system",
-        content:
-          "Extract contact details from the email. Return JSON with keys: first_name, last_name, email, phone, fax, title, address.",
-      },
-      {
-        role: "user",
-        content:
-          "Sender: " +
-          sender +
-          "\nSubject: " +
-          subject +
-          "\nBody: " +
-          snippet,
-      },
-    ],
-    response_format: { type: "json_object" },
-    temperature: 0.1,
-  });
-
-  return parseJson(response.choices[0]?.message?.content);
-}
-
 export async function POST(req) {
   let stage = "starting";
   let runId = "";
@@ -842,6 +774,12 @@ export async function POST(req) {
       throw new Error("The Gmail message does not contain a From address.");
     }
 
+    const analysisHeaders = Object.fromEntries(
+      headers
+        .filter((header) => header.name && header.value)
+        .map((header) => [header.name.toLowerCase(), header.value])
+    );
+
     stage = "checking saved contact state";
 
     const messageContact = await findContactForMessage(
@@ -890,11 +828,16 @@ export async function POST(req) {
 
     await assertRunActive(supabase, runId, user.id);
 
-    stage = "classifying sender";
+    stage = "analyzing sender and extracting contact";
 
-    const human = await classifySender(fromHeader);
+    const extracted = await analyzeEmailForContact({
+      from: fromHeader,
+      subject,
+      snippet,
+      headers: analysisHeaders,
+    });
 
-    if (!human) {
+    if (!extracted.is_human) {
       await setEmailStatus(
         supabase,
         connection.id,
@@ -913,23 +856,18 @@ export async function POST(req) {
         scanned: 1,
         botsFiltered: 1,
         contactsExtracted: 0,
-        activity: "Filtered non-human sender: " + fromHeader,
+        modelUsed: extracted.usedModel,
+        activity:
+          extracted.reason === "deterministic_automated_sender"
+            ? "Filtered obvious automated sender: " + fromHeader
+            : "Filtered non-human sender: " + fromHeader,
       });
     }
 
-    await assertRunActive(supabase, runId, user.id);
-
-    stage = "extracting contact";
-
-    const extracted = await extractContact(
-      fromHeader,
-      subject,
-      snippet
-    );
+    const senderEmail = extractEmailAddress(fromHeader);
 
     const senderEmail = extractEmailAddress(fromHeader);
-    const extractedEmail =
-      normalizeEmail(extracted.email) || senderEmail;
+    const extractedEmail = normalizeEmail(extracted.email) || senderEmail;
 
     if (!extractedEmail) {
       throw new Error(
