@@ -4,6 +4,9 @@ on:
   push:
     branches:
       - fix/runtime-processing-architecture
+  pull_request:
+    branches:
+      - main
   workflow_dispatch:
 
 permissions:
@@ -20,6 +23,7 @@ jobs:
           cache: npm
       - run: npm install
       - name: Commit refreshed lockfile
+        if: github.event_name == 'push'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
