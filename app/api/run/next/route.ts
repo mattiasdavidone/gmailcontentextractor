@@ -144,6 +144,33 @@ async function ensureContactsSheet(
   }
 }
 
+class RunCancelledError extends Error {
+  constructor() {
+    super("RUN_CANCELLED");
+  }
+}
+
+async function assertRunActive(
+  supabase: ReturnType<typeof createSupabase>,
+  runId: string,
+  userId: string
+) {
+  const { data, error } = await supabase
+    .from("tool_runs")
+    .select("status")
+    .eq("id", runId)
+    .eq("user_id", userId)
+    .maybeSingle();
+
+  if (error) {
+    throw new Error("Could not check run status: " + error.message);
+  }
+
+  if (!data || data.status !== "running") {
+    throw new RunCancelledError();
+  }
+}
+
 function errorMessage(error: unknown) {
   if (error instanceof Error) return error.message;
 
@@ -226,6 +253,8 @@ export async function POST(req: Request) {
       );
     }
 
+    await assertRunActive(supabase, runId, user.id);
+
     stage = "authorizing Google APIs";
 
     const auth = new google.auth.OAuth2(
@@ -240,6 +269,8 @@ export async function POST(req: Request) {
 
     stage = "checking destination spreadsheet";
     await ensureContactsSheet(sheets, connection.target_sheet_id);
+
+    await assertRunActive(supabase, runId, user.id);
 
     stage = "finding next Gmail message";
 
@@ -270,6 +301,8 @@ export async function POST(req: Request) {
       });
     }
 
+    await assertRunActive(supabase, runId, user.id);
+
     stage = "reading Gmail message";
 
     const msg = await gmail.users.messages.get({
@@ -288,6 +321,8 @@ export async function POST(req: Request) {
     if (!fromHeader) {
       throw new Error("The Gmail message does not contain a From address.");
     }
+
+    await assertRunActive(supabase, runId, user.id);
 
     stage = "checking scan label";
 
@@ -358,6 +393,8 @@ export async function POST(req: Request) {
       });
     }
 
+    await assertRunActive(supabase, runId, user.id);
+
     stage = "classifying sender";
 
     const isHuman = await checkIfSenderIsHuman(fromHeader);
@@ -413,9 +450,13 @@ export async function POST(req: Request) {
       });
     }
 
+    await assertRunActive(supabase, runId, user.id);
+
     stage = "extracting contact";
 
     const contact = await extractContactDetails(fromHeader, subject, snippet);
+
+    await assertRunActive(supabase, runId, user.id);
 
     stage = "writing contact to Google Sheet";
 
@@ -437,6 +478,8 @@ export async function POST(req: Request) {
       },
     });
 
+    await assertRunActive(supabase, runId, user.id);
+
     stage = "saving extracted contact";
 
     const { error: contactError } = await supabase
@@ -456,6 +499,8 @@ export async function POST(req: Request) {
       throw new Error(`Could not save extracted contact: ${contactError.message}`);
     }
 
+    await assertRunActive(supabase, runId, user.id);
+
     stage = "recording processed email";
 
     const { error: emailLogError } = await supabase.from("email_logs").insert({
@@ -468,6 +513,8 @@ export async function POST(req: Request) {
     if (emailLogError) {
       throw new Error(`Could not write email log: ${emailLogError.message}`);
     }
+
+    await assertRunActive(supabase, runId, user.id);
 
     stage = "labeling processed email";
 
@@ -500,6 +547,17 @@ export async function POST(req: Request) {
       activity: `Extracted contact from: ${fromHeader}`,
     });
   } catch (error) {
+    if (error instanceof RunCancelledError) {
+      return NextResponse.json({
+        done: true,
+        stopped: true,
+        scanned: 0,
+        botsFiltered: 0,
+        contactsExtracted: 0,
+        activity: "Run stopped.",
+      });
+    }
+
     console.error("Run step failed", { stage, error });
 
     try {
