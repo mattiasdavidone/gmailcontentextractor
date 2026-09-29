@@ -484,16 +484,20 @@ export async function POST(req: Request) {
 
     const { error: contactError } = await supabase
       .from("extracted_contacts")
-      .insert({
-        connection_id: connection.id,
-        run_id: runId,
-        email: contact.email || "",
-        first_name: contact.first_name,
-        last_name: contact.last_name,
-        phone: contact.phone,
-        title: contact.title,
-        address: contact.address,
-      });
+      .upsert(
+        {
+          connection_id: connection.id,
+          message_id: messageRef.id,
+          run_id: runId,
+          email: contact.email || "",
+          first_name: contact.first_name,
+          last_name: contact.last_name,
+          phone: contact.phone,
+          title: contact.title,
+          address: contact.address,
+        },
+        { onConflict: "connection_id,message_id" }
+      );
 
     if (contactError) {
       throw new Error(`Could not save extracted contact: ${contactError.message}`);
