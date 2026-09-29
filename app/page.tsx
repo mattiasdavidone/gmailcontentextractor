@@ -21,6 +21,7 @@ type StatusResponse = {
   connected: boolean;
   email: string | null;
   sheetId: string | null;
+  sheetTabName: string | null;
   accountEmail: string;
 };
 
@@ -35,6 +36,7 @@ export default function Dashboard() {
   const [stats, setStats] = useState<Stats>(EMPTY_STATS);
   const [sheetId, setSheetId] = useState("");
   const [sheetSaved, setSheetSaved] = useState(false);
+  const [sheetTabName, setSheetTabName] = useState<string | null>(null);
   const [connected, setConnected] = useState(false);
   const [email, setEmail] = useState<string | null>(null);
   const [accountEmail, setAccountEmail] = useState("");
@@ -112,6 +114,7 @@ export default function Dashboard() {
       if (data.sheetId) {
         setSheetId(data.sheetId);
         setSheetSaved(true);
+        setSheetTabName(data.sheetTabName || null);
       }
 
       if (justConnected) {
@@ -174,7 +177,13 @@ export default function Dashboard() {
 
       setSheetId(data.sheetId);
       setSheetSaved(true);
-      addActivity("Spreadsheet destination saved.", "success");
+      setSheetTabName(data.tabName || null);
+      addActivity(
+        data.tabName
+          ? `Spreadsheet saved. New Contacts tab created: ${data.tabName}`
+          : "Spreadsheet destination saved.",
+        "success"
+      );
     } catch (error) {
       const message =
         error instanceof Error ? error.message : "Unable to save the spreadsheet.";
@@ -535,7 +544,11 @@ export default function Dashboard() {
 
               <div className="mt-3 flex items-center justify-between gap-3">
                 <span className="text-[12px] text-[var(--muted)]">
-                  {sheetSaved ? "Saved" : "Not saved"}
+                  {sheetSaved
+                    ? sheetTabName
+                      ? `Saved · ${sheetTabName}`
+                      : "Saved"
+                    : "Not saved"}
                 </span>
 
                 <button
