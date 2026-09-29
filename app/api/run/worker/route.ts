@@ -159,13 +159,63 @@ export async function POST(req: Request) {
     }
 
     const { gmail } = createGmailClient(connection.refresh_token);
-    const messages = await getGmailMessagesInBatches(
-      gmail,
-      jobs.map((job) => job.message_id),
-      JOB_BATCH_SIZE
-    );
 
-    const messagesById = new Map(messages.map((message) => [message.id, message]));
+    let messagesById = new Map<
+      string,
+      Awaited<ReturnType<typeof getGmailMessagesInBatches>>[number]
+    >();
+
+    try {
+      const messages = await getGmailMessagesInBatches(
+        gmail,
+        jobs.map((job) => job.message_id),
+        JOB_BATCH_SIZE
+      );
+      messagesById = new Map(messages.map((message) => [message.id, message]));
+    } catch (error) {
+      const decision = classifyProcessingError(error);
+      const errorText = messageOf(error);
+
+      await Promise.all(
+        jobs.map(async (job) => {
+          try {
+            if (decision.permanent) {
+              await failRunJobPermanently(
+                supabase,
+                job.id,
+                workerId,
+                errorText
+              );
+            } else {
+              await finishRunJob(
+                supabase,
+                job.id,
+                workerId,
+                "failed",
+                errorText
+              );
+            }
+          } catch (finishError) {
+            console.error("Unable to record Gmail fetch failure", {
+              jobId: job.id,
+              finishError,
+            });
+          }
+        })
+      );
+
+      return NextResponse.json({
+        ok: true,
+        processed: 0,
+        filtered: 0,
+        contacts: 0,
+        failed: jobs.length,
+        retryableFailures: decision.retryable ? jobs.length : 0,
+        permanentFailures: decision.permanent ? jobs.length : 0,
+        retryReason: decision.reason,
+      });
+    }
+
     let processed = 0;
     let filtered = 0;
     let contacts = 0;
@@ -186,6 +236,7 @@ export async function POST(req: Request) {
             workerId,
             "Gmail message was not returned by the API."
           );
+          processed += 1;
           errors.push({
             jobId: job.id,
             retryable: false,
@@ -205,6 +256,7 @@ export async function POST(req: Request) {
             workerId,
             "The Gmail message does not contain a From address."
           );
+          processed += 1;
           errors.push({
             jobId: job.id,
             retryable: false,
@@ -222,8 +274,6 @@ export async function POST(req: Request) {
           headers: analysisHeaders,
         });
 
-        processed += 1;
-
         if (!extracted.is_human) {
           filtered += 1;
 
@@ -234,6 +284,7 @@ export async function POST(req: Request) {
             "skipped",
             extracted.reason
           );
+          processed += 1;
           continue;
         }
 
@@ -248,6 +299,7 @@ export async function POST(req: Request) {
             workerId,
             "The contact extractor did not return a usable email address."
           );
+          processed += 1;
           errors.push({
             jobId: job.id,
             retryable: false,
@@ -303,6 +355,7 @@ export async function POST(req: Request) {
             ? undefined
             : "Contact already existed for this Gmail connection."
         );
+        processed += 1;
       } catch (error) {
         const decision = classifyProcessingError(error);
         const errorText = messageOf(error);
