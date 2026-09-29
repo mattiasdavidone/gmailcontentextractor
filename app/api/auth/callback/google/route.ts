@@ -12,20 +12,32 @@ export async function GET(req: NextRequest) {
   const code = searchParams.get("code");
 
   if (!code) {
-    return NextResponse.json({ error: "NO CODE PROVIDED" }, { status: 400 });
+    return NextResponse.json(
+      { error: "NO CODE PROVIDED" },
+      { status: 400 }
+    );
   }
+
+  const redirectUri = new URL(
+    "/api/auth/callback/google",
+    req.url
+  ).toString();
 
   const oauth2Client = new google.auth.OAuth2(
     process.env.GOOGLE_CLIENT_ID,
     process.env.GOOGLE_CLIENT_SECRET,
-    `${process.env.NEXT_PUBLIC_APP_URL || "https://gmailcontentextractor.vercel.app"}/api/auth/callback/google`
+    redirectUri
   );
 
   try {
     const { tokens } = await oauth2Client.getToken(code);
     oauth2Client.setCredentials(tokens);
 
-    const oauth2 = google.oauth2({ version: "v2", auth: oauth2Client });
+    const oauth2 = google.oauth2({
+      version: "v2",
+      auth: oauth2Client,
+    });
+
     const userInfo = await oauth2.userinfo.get();
     const userEmail = userInfo.data.email;
 
@@ -36,21 +48,28 @@ export async function GET(req: NextRequest) {
       );
     }
 
-    const { error } = await supabase.from("google_connections").upsert(
-      {
-        google_email: userEmail,
-        refresh_token: tokens.refresh_token,
-        is_active: true,
-      },
-      { onConflict: "google_email" }
-    );
+    const { error } = await supabase
+      .from("google_connections")
+      .upsert(
+        {
+          google_email: userEmail,
+          refresh_token: tokens.refresh_token,
+          is_active: true,
+        },
+        { onConflict: "google_email" }
+      );
 
-    if (error) throw error;
+    if (error) {
+      throw error;
+    }
 
     return NextResponse.redirect(
-      `${process.env.NEXT_PUBLIC_APP_URL || "https://gmailcontentextractor.vercel.app"}/?status=connected`
+      new URL("/?status=connected", req.url)
     );
   } catch (err: any) {
-    return NextResponse.json({ error: err.message }, { status: 500 });
+    return NextResponse.json(
+      { error: err.message },
+      { status: 500 }
+    );
   }
 }
