@@ -461,62 +461,6 @@ async function ensureContactWrittenToSheet(
   return contactsTab.tabId;
 }
 
-async function writeContactToSheet(
-  sheets,
-  connection,
-  contact,
-  messageId
-) {
-  const contactsTab = await ensureContactsTab(
-    sheets,
-    connection.target_sheet_id,
-    connection.target_sheet_tab_id,
-    connection.target_sheet_tab_name
-  );
-
-  return {
-    ...contactsTab,
-    ...(await (async () => {
-      if (
-        contact.sheet_written &&
-        contact.sheet_written_to ===
-          connection.target_sheet_id + ":" + String(contactsTab.tabId)
-      ) {
-        return {};
-      }
-
-      if (!contact.sheet_written) {
-        const alreadyThere = await hasMessageIdInSheet(
-          sheets,
-          connection.target_sheet_id,
-          contactsTab.title,
-          messageId
-        );
-
-        if (!alreadyThere) {
-          await appendContact(
-            sheets,
-            connection.target_sheet_id,
-            contactsTab.title,
-            {
-              first_name: contact.first_name,
-              last_name: contact.last_name,
-              email: contact.email,
-              phone: contact.phone,
-              title: contact.title,
-              address: contact.address,
-              source: contact.email || "",
-              message_id: messageId,
-            }
-          );
-        }
-      }
-
-      return {};
-    })()),
-  };
-}
-
 export async function POST(req) {
   let stage = "starting";
   let runId = "";
