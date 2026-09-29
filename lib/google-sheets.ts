@@ -41,7 +41,7 @@ export function isGoogleQuotaError(error: unknown) {
 
 export async function withGoogleRetry<T>(
   operation: () => Promise<T>,
-  retries = 4
+  retries = 3
 ): Promise<T> {
   let attempt = 0;
 
@@ -56,9 +56,10 @@ export async function withGoogleRetry<T>(
           0
       );
 
-      const retryable = status === 429 || status === 503;
-
-      if (attempt >= retries || !retryable) {
+      // Google Sheets quota 429s are handled at the run boundary so the
+      // caller can back off without multiplying requests inside a single
+      // request. Only retry transient 503s here.
+      if (attempt >= retries || status !== 503) {
         throw error;
       }
 
@@ -69,9 +70,9 @@ export async function withGoogleRetry<T>(
       const retryAfterSeconds = Number(retryAfterHeader);
       const delay =
         Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0
-          ? Math.min(60_000, retryAfterSeconds * 1_000)
-          : Math.min(16_000, 1_000 * 2 ** attempt) +
-            Math.floor(Math.random() * 1_000);
+          ? Math.min(30_000, retryAfterSeconds * 1_000)
+          : Math.min(8_000, 500 * 2 ** attempt) +
+            Math.floor(Math.random() * 500);
 
       await new Promise((resolve) => setTimeout(resolve, delay));
       attempt += 1;
