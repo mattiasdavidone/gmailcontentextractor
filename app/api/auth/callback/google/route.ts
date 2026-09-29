@@ -9,13 +9,15 @@ export async function GET(req: NextRequest) {
   const user = await getCurrentUser();
 
   if (!user) {
-    return NextResponse.redirect(new URL("/login", req.url));
+    const errorUrl = new URL("/", req.url);
+    errorUrl.searchParams.set("google_error", "1");
+    return NextResponse.redirect(errorUrl);
   }
 
   const code = req.nextUrl.searchParams.get("code");
 
   if (!code) {
-    return NextResponse.redirect(new URL("/", req.url));
+    return NextResponse.redirect(new URL("/?connected=1", req.url));
   }
 
   const redirectUri = new URL(
