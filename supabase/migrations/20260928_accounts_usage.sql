@@ -99,3 +99,8 @@ alter table public.extracted_contacts
 
 alter table public.extracted_contacts
   add column if not exists sheet_written_to text;
+
+
+alter table public.google_connections
+  add column if not exists target_sheet_tab_id bigint,
+  add column if not exists target_sheet_tab_name text;
