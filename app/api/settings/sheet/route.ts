@@ -174,8 +174,11 @@ export async function POST(req: NextRequest) {
         : null
     );
 
-    if (typeof contactsTab.tabId !== "number") {
-      throw new Error("Google did not return a valid Contacts tab ID.");
+    if (
+      typeof contactsTab.tabId !== "number" ||
+      typeof contactsTab.title !== "string"
+    ) {
+      throw new Error("Google did not return a valid Contacts tab.");
     }
 
     const imported = await importExistingContacts(
