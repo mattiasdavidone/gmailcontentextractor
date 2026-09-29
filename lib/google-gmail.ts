@@ -94,16 +94,23 @@ export function normalizeGmailMessage(message: GmailMessage) {
  * bounded parallel get calls instead. This keeps concurrency below Gmail's
  * per-user pressure point and is easy to retry per-message.
  */
+export type GmailMessageFetchResult = {
+  id: string;
+  message?: ReturnType<typeof normalizeGmailMessage>;
+  error?: unknown;
+};
+
 export async function getGmailMessagesInBatches(
   gmail: ReturnType<typeof google.gmail>,
   messageIds: string[],
   batchSize = GMAIL_PROCESS_BATCH_SIZE
-) {
-  const messages: GmailMessage[] = [];
+): Promise<GmailMessageFetchResult[]> {
+  const results: GmailMessageFetchResult[] = [];
 
   for (let offset = 0; offset < messageIds.length; offset += batchSize) {
     const batchIds = messageIds.slice(offset, offset + batchSize);
-    const results = await Promise.all(
+
+    const settled = await Promise.allSettled(
       batchIds.map(async (id) => {
         const response = await gmail.users.messages.get({
           userId: "me",
@@ -119,12 +126,26 @@ export async function getGmailMessagesInBatches(
           ],
         });
 
-        return response.data as GmailMessage;
+        return {
+          id,
+          message: normalizeGmailMessage(response.data as GmailMessage),
+        };
       })
     );
 
-    messages.push(...results);
+    settled.forEach((result, index) => {
+      const id = batchIds[index];
+
+      if (result.status === "fulfilled") {
+        results.push(result.value);
+      } else {
+        results.push({
+          id,
+          error: result.reason,
+        });
+      }
+    });
   }
 
-  return messages.map(normalizeGmailMessage);
+  return results;
 }
