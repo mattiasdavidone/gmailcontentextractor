@@ -50,17 +50,6 @@ export async function POST() {
       });
     }
 
-    const { count, error: logDeleteError } = await supabase
-      .from("email_logs")
-      .delete({ count: "exact" })
-      .in("connection_id", connectionIds);
-
-    if (logDeleteError) {
-      throw new Error(
-        "Could not clear processing history: " + logDeleteError.message
-      );
-    }
-
     const { error: runError } = await supabase
       .from("tool_runs")
       .update({
@@ -76,14 +65,38 @@ export async function POST() {
       );
     }
 
+    // Preserve processing history for diagnostics and auditing. A reset only
+    // changes completed/failed state back to a retryable marker.
+    const { count, error: resetError } = await supabase
+      .from("email_logs")
+      .update({
+        status: "reset",
+        run_id: null,
+        processed_at: new Date().toISOString(),
+      })
+      .in("connection_id", connectionIds)
+      .in("status", [
+        "bot_filtered",
+        "contact_already_in_sheet",
+        "contact_extracted",
+        "failed",
+        "processing",
+      ]);
+
+    if (resetError) {
+      throw new Error(
+        "Could not reset processing history: " + resetError.message
+      );
+    }
+
     return NextResponse.json({
       success: true,
       emailsReset: count || 0,
       contactsPreserved: true,
       message:
         count && count > 0
-          ? "Processing history was cleared. Existing contacts were preserved, so rerunning will not create duplicate contact rows."
-          : "Processing history was already clear. Existing contacts were preserved.",
+          ? "Processing history was reset. Existing contacts were preserved, so rerunning will not create duplicate contact rows."
+          : "Processing history was already reset. Existing contacts were preserved.",
     });
   } catch (error) {
     console.error("Reset processing history failed", error);
