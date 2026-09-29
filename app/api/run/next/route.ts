@@ -298,6 +298,12 @@ export async function POST(req: Request) {
         .eq("user_id", user.id);
 
       return NextResponse.json({
+        done: false,
+        scanned: 1,
+        botsFiltered: 0,
+        contactsExtracted: 0,
+        activity: `Already processed email: ${fromHeader}`,
+      });
     }
 
     stage = "classifying sender";
@@ -347,6 +353,12 @@ export async function POST(req: Request) {
         .eq("user_id", user.id);
 
       return NextResponse.json({
+        done: false,
+        scanned: 1,
+        botsFiltered: 1,
+        contactsExtracted: 0,
+        activity: `Filtered non-human sender: ${fromHeader}`,
+      });
     }
 
     stage = "extracting contact";
