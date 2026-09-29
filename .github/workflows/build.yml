@@ -6,6 +6,7 @@ on:
       - main
       - fix/runtime-processing-architecture
       - fix/final-processing-hardening
+      - rewrite/batched-processing
   pull_request:
     branches:
       - main
