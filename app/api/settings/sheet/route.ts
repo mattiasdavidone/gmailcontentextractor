@@ -152,6 +152,32 @@ export async function POST(req: NextRequest) {
     );
   }
 
+  const { data: activeRun, error: activeRunError } = await supabase
+    .from("tool_runs")
+    .select("id")
+    .eq("user_id", user.id)
+    .eq("connection_id", connection.id)
+    .eq("status", "running")
+    .limit(1)
+    .maybeSingle();
+
+  if (activeRunError) {
+    return NextResponse.json(
+      { error: activeRunError.message },
+      { status: 500 }
+    );
+  }
+
+  if (activeRun) {
+    return NextResponse.json(
+      {
+        error:
+          "Stop the current Gmail scan before changing the Google Sheet destination.",
+      },
+      { status: 409 }
+    );
+  }
+
   const auth = new google.auth.OAuth2(
     process.env.GOOGLE_CLIENT_ID,
     process.env.GOOGLE_CLIENT_SECRET
