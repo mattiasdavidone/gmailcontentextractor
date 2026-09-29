@@ -177,6 +177,13 @@ export async function getTargetContactsTab(
   return createContactsTab(sheets, spreadsheetId);
 }
 
+export function extractEmailAddress(fromHeader: string) {
+  const angleMatch = fromHeader.match(/<([^>]+)>/);
+  const raw = angleMatch?.[1] || fromHeader;
+  const emailMatch = raw.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}/i);
+  return emailMatch ? emailMatch[0].trim().toLowerCase() : "";
+}
+
 function normalizeEmail(value: string) {
   return value.trim().toLowerCase();
 }
