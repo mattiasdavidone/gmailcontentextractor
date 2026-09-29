@@ -865,8 +865,6 @@ export async function POST(req) {
     }
 
     const senderEmail = extractEmailAddress(fromHeader);
-
-    const senderEmail = extractEmailAddress(fromHeader);
     const extractedEmail = normalizeEmail(extracted.email) || senderEmail;
 
     if (!extractedEmail) {
