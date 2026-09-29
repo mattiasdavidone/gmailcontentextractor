@@ -77,8 +77,10 @@ export default function Dashboard() {
     }
   }
 
-  async function connectGmail() {
-    window.location.href = "/api/auth/google";
+  function connectGmail(force = false) {
+    window.location.href = force
+      ? "/api/auth/google?force=1"
+      : "/api/auth/google";
   }
 
   async function saveSheet(event: FormEvent<HTMLFormElement>) {
@@ -376,7 +378,7 @@ export default function Dashboard() {
               </span>
 
               <button
-                onClick={connectGmail}
+                onClick={() => connectGmail(connected)}
                 className="rounded-md border border-[var(--border)] bg-white px-3 py-2 text-[12px] font-medium transition hover:bg-[var(--surface-muted)]"
               >
                 {connected ? "Reconnect" : "Connect Gmail"}
