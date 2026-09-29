@@ -51,6 +51,13 @@ create index if not exists linked_spreadsheets_user_id_idx
 alter table public.google_connections
   add column if not exists user_id uuid references public.app_users(id) on delete cascade;
 
+alter table public.extracted_contacts
+  add column if not exists connection_id uuid references public.google_connections(id) on delete cascade,
+  add column if not exists message_id text;
+
+create unique index if not exists extracted_contacts_connection_message_key
+  on public.extracted_contacts(connection_id, message_id);
+
 alter table public.email_logs
   add column if not exists run_id uuid references public.tool_runs(id) on delete set null;
 
