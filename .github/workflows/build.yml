@@ -36,4 +36,18 @@ jobs:
             git push
           fi
       - run: npm ci
-      - run: npm run build
+      - name: Build with log capture
+        id: build
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          npm run build 2>&1 | tee build.log
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: build.log
+      - name: Fail if build failed
+        if: steps.build.outcome == 'failure'
+        run: exit 1
