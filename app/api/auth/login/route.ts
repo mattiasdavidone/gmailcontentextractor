@@ -24,7 +24,11 @@ export async function POST(req: NextRequest) {
       .maybeSingle();
 
     if (error) {
-      return NextResponse.json({ error: error.message }, { status: 500 });
+      console.error("Login lookup failed", error);
+      return NextResponse.json(
+        { error: "Unable to sign in right now." },
+        { status: 500 }
+      );
     }
 
     if (!user || !verifyPassword(password, user.password_hash)) {
