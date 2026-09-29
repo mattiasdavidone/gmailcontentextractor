@@ -1,6 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
 import { google } from "googleapis";
-import { createClient } from "@supabase/supabase-js";
 import { getCurrentUser } from "@/lib/auth";
 
 export async function GET(req: NextRequest) {
@@ -16,7 +15,6 @@ export async function GET(req: NextRequest) {
   ).toString();
 
   // Reconnect uses prompt=consent below to obtain a fresh offline grant.
-
   const oauth2Client = new google.auth.OAuth2(
     process.env.GOOGLE_CLIENT_ID,
     process.env.GOOGLE_CLIENT_SECRET,
