@@ -260,6 +260,8 @@ export async function POST(req: NextRequest) {
       spreadsheetUrl: contactsTab.spreadsheetUrl,
       tabName: contactsTab.title,
       importedContacts: imported,
+      reused: false,
+      created: contactsTab.created === true,
     });
   } catch (error) {
     console.error("Google Sheet save failed", {
