@@ -79,21 +79,24 @@ async function importExistingContacts(
     sheet_written_to: sheetWrittenTo,
   }));
 
-  const { error } = await supabase
+  const { data: inserted, error } = await supabase
     .from("extracted_contacts")
     .upsert(payload, {
       onConflict: "connection_id,normalized_email",
-      ignoreDuplicates: false,
-    });
+      ignoreDuplicates: true,
+    })
+    .select("id");
 
   if (error) {
     throw new Error(
-      "The spreadsheet was linked, but existing contacts could not be imported: " +
+      "The spreadsheet was linked, but new existing-contact records could not be imported: " +
         error.message
     );
   }
 
-  return contacts.length;
+  // Linking a spreadsheet must never overwrite contact fields already stored
+  // in Supabase. Only genuinely new contact identities are imported.
+  return Array.isArray(inserted) ? inserted.length : 0;
 }
 
 export async function POST(req: NextRequest) {
