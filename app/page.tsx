@@ -338,7 +338,7 @@ export default function Dashboard() {
 
     setRunState("cancelled");
     addActivity(
-      "Run cancelled. The current email may finish before stopping.",
+      "Run stopped. The current email may finish before stopping.",
       "warning"
     );
   }
@@ -454,7 +454,7 @@ export default function Dashboard() {
             <div>
               <h2 className="text-[14px] font-medium">Run controls</h2>
               <p className="mt-1 text-[12px] text-[var(--muted)]">
-                Begin a scan or stop the current run.
+                Begin a scan or stop the current run. The stop control takes effect at the current email boundary.
               </p>
             </div>
 
@@ -472,7 +472,7 @@ export default function Dashboard() {
                 disabled={runState !== "running"}
                 className="rounded-md border border-[var(--border)] bg-white px-4 py-2 text-[12px] font-medium transition hover:bg-[var(--surface-muted)]"
               >
-                Cancel
+                Stop
               </button>
 
             </div>
