@@ -21,7 +21,6 @@ export async function GET() {
     .select("id, google_email, target_sheet_id, is_active, user_id")
     .eq("user_id", user.id)
     .eq("is_active", true)
-    .order("updated_at", { ascending: false, nullsFirst: false })
     .limit(1)
     .maybeSingle();
 
