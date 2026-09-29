@@ -508,6 +508,16 @@ export default function Dashboard() {
             </a>
             <button
               onClick={async () => {
+                const activeRunId = runIdRef.current;
+
+                if (activeRunId) {
+                  await fetch("/api/run/cancel", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ runId: activeRunId }),
+                  }).catch(() => undefined);
+                }
+
                 await fetch("/api/auth/logout", { method: "POST" });
                 window.location.href = "/login";
               }}
