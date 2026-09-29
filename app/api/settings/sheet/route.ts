@@ -160,6 +160,34 @@ export async function POST(req: NextRequest) {
   auth.setCredentials({ refresh_token: connection.refresh_token });
 
   try {
+    // Saving the same spreadsheet again is a no-op. The run engine already
+    // has the validated Contacts tab stored on the connection, so avoid
+    // another workbook/header/data read and avoid burning Sheets quota.
+    if (
+      connection.target_sheet_id === sheetId &&
+      typeof connection.target_sheet_tab_id === "number" &&
+      connection.target_sheet_tab_name
+    ) {
+      const { data: linked } = await supabase
+        .from("linked_spreadsheets")
+        .select("title, spreadsheet_url")
+        .eq("user_id", user.id)
+        .eq("spreadsheet_id", sheetId)
+        .limit(1)
+        .maybeSingle();
+
+      return NextResponse.json({
+        sheetId,
+        title: linked?.title || "Google Sheet",
+        spreadsheetUrl:
+          linked?.spreadsheet_url ||
+          "https://docs.google.com/spreadsheets/d/" + sheetId + "/edit",
+        tabName: connection.target_sheet_tab_name,
+        importedContacts: 0,
+        reused: true,
+      });
+    }
+
     const sheets = google.sheets({ version: "v4", auth });
 
     const contactsTab = await ensureContactsTab(
