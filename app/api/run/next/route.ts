@@ -452,6 +452,7 @@ export async function POST(req: Request) {
 
     try {
       const supabase = createSupabase();
+
       if (runId) {
         await supabase
           .from("tool_runs")
@@ -461,6 +462,40 @@ export async function POST(req: Request) {
           })
           .eq("id", runId)
           .eq("user_id", user.id);
+      }
+
+      const message = errorMessage(error);
+
+      if (
+        message.toLowerCase().includes("invalid_grant") ||
+        message.toLowerCase().includes("invalid grant") ||
+        message.toLowerCase().includes("token has been expired") ||
+        message.toLowerCase().includes("token has been revoked")
+      ) {
+        // Do not keep showing "Connected" when Google has rejected the
+        // stored refresh token. The user must authorize Gmail again.
+        await supabase
+          .from("google_connections")
+          .update({
+            is_active: false,
+            refresh_token: null,
+          })
+          .eq("id", runId ? (await supabase
+            .from("tool_runs")
+            .select("connection_id")
+            .eq("id", runId)
+            .eq("user_id", user.id)
+            .maybeSingle()).data?.connection_id : "")
+          .eq("user_id", user.id);
+
+        return NextResponse.json(
+          {
+            error:
+              "Your Gmail authorization has expired or been revoked. Reconnect Gmail before running the extractor again.",
+            authRequired: true,
+          },
+          { status: 401 }
+        );
       }
     } catch {}
 
