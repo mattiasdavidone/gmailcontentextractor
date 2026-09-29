@@ -176,7 +176,11 @@ The dependency audit evaluates the post-fix vulnerability report and fails when 
 
 The project is configured for Vercel as a Next.js application.
 
-Set all required environment variables in the Vercel project before deploying, including `CRON_SECRET`. The repository defines `/api/run/cron` as a once-per-minute scheduler. Vercel permits once-per-minute cron jobs on Pro and Enterprise; Hobby cron jobs are limited to once per day, so a Hobby deployment cannot provide continuous background advancement for a 1,000-message run. Make sure the Google OAuth callback URL matches the deployment hostname.
+Set all required environment variables in the Vercel project before deploying, including `CRON_SECRET`. Use the **same** `CRON_SECRET` value as a GitHub Actions repository secret named `CRON_SECRET`.
+
+Continuous processing is deliberately not delegated to Vercel Cron. The repository's `.github/workflows/durable-processing.yml` wakes the durable worker every five minutes and keeps advancing it server-side for several minutes, which works with the Hobby Vercel plan. GitHub documents five minutes as the shortest scheduled-workflow interval.
+
+Make sure the Google OAuth callback URL matches the deployment hostname.
 
 Vercel can apply deployment/build rate limits independently of GitHub Actions. A successful repository build does not guarantee that a new Vercel deployment can be started immediately.
 
