@@ -23,83 +23,6 @@ function createSupabase() {
   );
 }
 
-function parseModelJson(value: string | null | undefined) {
-  if (!value) return {};
-  try {
-    return JSON.parse(value);
-  } catch {
-    throw new Error("OpenAI returned invalid JSON.");
-  }
-}
-
-async function checkIfSenderIsHuman(senderRaw: string) {
-  const response = await openai.chat.completions.create({
-    model: "gpt-4o-mini",
-    messages: [
-      {
-        role: "system",
-        content:
-          "Analyze the sender email address. Return strictly JSON with { is_human: boolean }.",
-      },
-      { role: "user", content: `Sender: ${senderRaw}` },
-    ],
-    response_format: { type: "json_object" },
-    temperature: 0,
-  });
-
-  const result = parseModelJson(response.choices[0]?.message?.content);
-  return result.is_human === true;
-}
-
-async function extractContactDetails(
-  senderRaw: string,
-  subject: string,
-  bodyText: string
-) {
-  const response = await openai.chat.completions.create({
-    model: "gpt-4o-mini",
-    messages: [
-      {
-        role: "system",
-        content:
-          "Extract contact details from email text. Return JSON with keys: first_name, last_name, email, phone, fax, title, address.",
-      },
-      {
-        role: "user",
-        content: `Sender: ${senderRaw}\nSubject: ${subject}\nBody: ${bodyText}`,
-      },
-    ],
-    response_format: { type: "json_object" },
-    temperature: 0.1,
-  });
-
-  return parseModelJson(response.choices[0]?.message?.content);
-}
-
-async function getScanLabel(gmail: any) {
-  const labels = await gmail.users.labels.list({ userId: "me" });
-  const existing = (labels.data.labels || []).find(
-    (label: any) => label.name === "AI-Scanned"
-  );
-
-  if (existing?.id) return existing.id;
-
-  const created = await gmail.users.labels.create({
-    userId: "me",
-    requestBody: {
-      name: "AI-Scanned",
-      labelListVisibility: "labelShow",
-      messageListVisibility: "show",
-    },
-  });
-
-  if (!created.data.id) {
-    throw new Error("Google did not return a label ID for AI-Scanned.");
-  }
-
-  return created.data.id;
-}
-
 class RunCancelledError extends Error {
   constructor() {
     super("RUN_CANCELLED");
@@ -129,7 +52,6 @@ async function assertRunActive(
 
 function errorMessage(error: unknown) {
   if (error instanceof Error) return error.message;
-
   if (typeof error === "string") return error;
 
   try {
@@ -137,6 +59,201 @@ function errorMessage(error: unknown) {
   } catch {
     return "Unknown run error.";
   }
+}
+
+function parseJson(value: string | null | undefined) {
+  if (!value) return {};
+
+  try {
+    return JSON.parse(value);
+  } catch {
+    throw new Error("OpenAI returned invalid JSON.");
+  }
+}
+
+async function classifySender(sender: string) {
+  const response = await openai.chat.completions.create({
+    model: "gpt-4o-mini",
+    messages: [
+      {
+        role: "system",
+        content:
+          "Analyze the sender email address. Return strictly JSON: {"is_human": boolean}.",
+      },
+      {
+        role: "user",
+        content: "Sender: " + sender,
+      },
+    ],
+    response_format: { type: "json_object" },
+    temperature: 0,
+  });
+
+  const parsed = parseJson(response.choices[0]?.message?.content);
+  return parsed.is_human === true;
+}
+
+async function extractContact(
+  sender: string,
+  subject: string,
+  snippet: string
+) {
+  const response = await openai.chat.completions.create({
+    model: "gpt-4o-mini",
+    messages: [
+      {
+        role: "system",
+        content:
+          "Extract contact details from the email. Return JSON with keys: first_name, last_name, email, phone, fax, title, address.",
+      },
+      {
+        role: "user",
+        content:
+          "Sender: " +
+          sender +
+          "\nSubject: " +
+          subject +
+          "\nBody: " +
+          snippet,
+      },
+    ],
+    response_format: { type: "json_object" },
+    temperature: 0.1,
+  });
+
+  return parseJson(response.choices[0]?.message?.content);
+}
+
+async function getScanLabel(gmail: any) {
+  const response = await gmail.users.labels.list({ userId: "me" });
+  const label = (response.data.labels || []).find(
+    (item: any) => item.name === "AI-Scanned"
+  );
+
+  if (label?.id) return label.id;
+
+  const created = await gmail.users.labels.create({
+    userId: "me",
+    requestBody: {
+      name: "AI-Scanned",
+      labelListVisibility: "labelShow",
+      messageListVisibility: "show",
+    },
+  });
+
+  if (!created.data.id) {
+    throw new Error("Google did not return the AI-Scanned label ID.");
+  }
+
+  return created.data.id;
+}
+
+async function incrementRun(
+  supabase: ReturnType<typeof createSupabase>,
+  runId: string,
+  userId: string,
+  delta: {
+    scanned?: number;
+    filtered?: number;
+    contacts?: number;
+  }
+) {
+  const { data, error } = await supabase
+    .from("tool_runs")
+    .select("emails_scanned, bots_filtered, contacts_extracted")
+    .eq("id", runId)
+    .eq("user_id", userId)
+    .single();
+
+  if (error) {
+    throw new Error("Could not load run totals: " + error.message);
+  }
+
+  const { error: updateError } = await supabase
+    .from("tool_runs")
+    .update({
+      emails_scanned: (data.emails_scanned || 0) + (delta.scanned || 0),
+      bots_filtered: (data.bots_filtered || 0) + (delta.filtered || 0),
+      contacts_extracted:
+        (data.contacts_extracted || 0) + (delta.contacts || 0),
+    })
+    .eq("id", runId)
+    .eq("user_id", userId);
+
+  if (updateError) {
+    throw new Error("Could not update run totals: " + updateError.message);
+  }
+}
+
+async function recordEmail(
+  supabase: ReturnType<typeof createSupabase>,
+  connectionId: string,
+  runId: string,
+  messageId: string,
+  status: string
+) {
+  const { error } = await supabase
+    .from("email_logs")
+    .upsert(
+      {
+        connection_id: connectionId,
+        run_id: runId,
+        message_id: messageId,
+        status,
+      },
+      { onConflict: "connection_id,message_id" }
+    );
+
+  if (error) {
+    throw new Error("Could not write email log: " + error.message);
+  }
+}
+
+async function markLabel(gmail: any, messageId: string, labelId: string) {
+  await gmail.users.messages.modify({
+    userId: "me",
+    id: messageId,
+    requestBody: {
+      addLabelIds: [labelId],
+    },
+  });
+}
+
+async function appendContact(
+  sheets: ReturnType<typeof google.sheets>,
+  spreadsheetId: string,
+  tabName: string,
+  contact: {
+    first_name?: string | null;
+    last_name?: string | null;
+    email?: string | null;
+    phone?: string | null;
+    title?: string | null;
+    address?: string | null;
+    source: string;
+  }
+) {
+  const safeTitle = tabName.replace(/'/g, "''");
+
+  await sheets.spreadsheets.values.append({
+    spreadsheetId,
+    range: "'" + safeTitle + "'!A:H",
+    valueInputOption: "USER_ENTERED",
+    requestBody: {
+      values: [
+        [
+          contact.first_name || "",
+          contact.last_name || "",
+          contact.email || "",
+          contact.phone || "",
+          "",
+          contact.title || "",
+          contact.address || "",
+          contact.source,
+        ],
+      ],
+    },
+  });
 }
 
 export async function POST(req: Request) {
@@ -153,13 +270,16 @@ export async function POST(req: Request) {
   runId = typeof body?.runId === "string" ? body.runId : "";
 
   if (!runId) {
-    return NextResponse.json({ error: "runId is required." }, { status: 400 });
+    return NextResponse.json(
+      { error: "runId is required." },
+      { status: 400 }
+    );
   }
 
   try {
     const supabase = createSupabase();
 
-    stage = "loading Gmail connection";
+    stage = "loading run";
 
     const { data: run, error: runError } = await supabase
       .from("tool_runs")
@@ -183,6 +303,8 @@ export async function POST(req: Request) {
       );
     }
 
+    stage = "loading Gmail connection";
+
     const { data: connection, error: connectionError } = await supabase
       .from("google_connections")
       .select("*")
@@ -192,7 +314,9 @@ export async function POST(req: Request) {
       .maybeSingle();
 
     if (connectionError) {
-      throw new Error(`Supabase connection lookup failed: ${connectionError.message}`);
+      throw new Error(
+        "Could not load Gmail connection: " + connectionError.message
+      );
     }
 
     if (!connection) {
@@ -211,7 +335,7 @@ export async function POST(req: Request) {
 
     await assertRunActive(supabase, runId, user.id);
 
-    stage = "authorizing Google APIs";
+    stage = "authorizing Google";
 
     const auth = new google.auth.OAuth2(
       process.env.GOOGLE_CLIENT_ID,
@@ -220,12 +344,19 @@ export async function POST(req: Request) {
 
     auth.setCredentials({ refresh_token: connection.refresh_token });
 
-    const gmail = google.gmail({ version: "v1", auth });
-    const sheets = google.sheets({ version: "v4", auth });
+    const gmail = google.gmail({
+      version: "v1",
+      auth,
+    });
 
-    stage = "checking destination spreadsheet";
+    const sheets = google.sheets({
+      version: "v4",
+      auth,
+    });
 
-    const targetTab = await getTargetContactsTab(
+    stage = "checking Contacts tab";
+
+    const contactsTab = await getTargetContactsTab(
       sheets,
       connection.target_sheet_id,
       connection.target_sheet_tab_id,
@@ -233,42 +364,38 @@ export async function POST(req: Request) {
     );
 
     if (
-      connection.target_sheet_tab_id !== targetTab.tabId ||
-      connection.target_sheet_tab_name !== targetTab.title
+      connection.target_sheet_tab_id !== contactsTab.tabId ||
+      connection.target_sheet_tab_name !== contactsTab.title
     ) {
-      const { error: tabUpdateError } = await supabase
+      const { error: tabError } = await supabase
         .from("google_connections")
         .update({
-          target_sheet_tab_id: targetTab.tabId,
-          target_sheet_tab_name: targetTab.title,
+          target_sheet_tab_id: contactsTab.tabId,
+          target_sheet_tab_name: contactsTab.title,
         })
         .eq("id", connection.id)
         .eq("user_id", user.id);
 
-      if (tabUpdateError) {
+      if (tabError) {
         throw new Error(
-          "Could not save the active Contacts tab: " +
-            tabUpdateError.message
+          "Could not save the Contacts tab: " + tabError.message
         );
       }
     }
 
     await assertRunActive(supabase, runId, user.id);
 
-    const activeContactsTab = targetTab.title;
-    const activeContactsTabId = targetTab.tabId;
-
     stage = "finding next Gmail message";
 
-    const listRes = await gmail.users.messages.list({
+    const listResponse = await gmail.users.messages.list({
       userId: "me",
       q: "in:inbox -label:AI-Scanned",
       maxResults: 1,
     });
 
-    const messageRef = listRes.data.messages?.[0];
+    const messageId = listResponse.data.messages?.[0]?.id;
 
-    if (!messageRef?.id) {
+    if (!messageId) {
       await supabase
         .from("tool_runs")
         .update({
@@ -291,595 +418,291 @@ export async function POST(req: Request) {
 
     stage = "reading Gmail message";
 
-    const msg = await gmail.users.messages.get({
+    const message = await gmail.users.messages.get({
       userId: "me",
-      id: messageRef.id,
+      id: messageId,
       format: "full",
     });
 
-    const headers = msg.data.payload?.headers || [];
+    const headers = message.data.payload?.headers || [];
     const fromHeader =
-      headers.find((h) => h.name?.toLowerCase() === "from")?.value || "";
+      headers.find((header) => header.name?.toLowerCase() === "from")
+        ?.value || "";
     const subject =
-      headers.find((h) => h.name?.toLowerCase() === "subject")?.value || "";
-    const snippet = msg.data.snippet || "";
+      headers.find((header) => header.name?.toLowerCase() === "subject")
+        ?.value || "";
+    const snippet = message.data.snippet || "";
 
     if (!fromHeader) {
       throw new Error("The Gmail message does not contain a From address.");
     }
 
-    await assertRunActive(supabase, runId, user.id);
-
-    stage = "checking scan label";
-
+    stage = "getting scan label";
     const labelId = await getScanLabel(gmail);
 
-    // Make each email step idempotent. If a previous attempt already recorded
-    // this message, do not run OpenAI or append to the Sheet a second time.
+    stage = "checking email history";
+
     const { data: existingLog, error: existingLogError } = await supabase
       .from("email_logs")
       .select("status")
       .eq("connection_id", connection.id)
-      .eq("message_id", messageRef.id)
+      .eq("message_id", messageId)
       .maybeSingle();
 
     if (existingLogError) {
-      throw new Error(`Could not check email log: ${existingLogError.message}`);
-    }
-
-    if (existingLog?.status) {
-      stage = "finishing previously processed email";
-
-      await gmail.users.messages.modify({
-        userId: "me",
-        id: messageRef.id,
-        requestBody: { addLabelIds: [labelId] },
-      });
-
-      if (existingLog.status === "bot_filtered") {
-        return NextResponse.json({
-          done: false,
-          scanned: 1,
-          botsFiltered: 1,
-          contactsExtracted: 0,
-          activity: `Already filtered: ${fromHeader}`,
-        });
-      }
-
-      if (existingLog.status === "contact_already_in_sheet") {
-        const { data: currentRun } = await supabase
-          .from("tool_runs")
-          .select("emails_scanned, bots_filtered, contacts_extracted")
-          .eq("id", runId)
-          .single();
-
-        await supabase
-          .from("tool_runs")
-          .update({
-            emails_scanned: (currentRun?.emails_scanned || 0) + 1,
-          })
-          .eq("id", runId)
-          .eq("user_id", user.id);
-
-        return NextResponse.json({
-          done: false,
-          scanned: 1,
-          botsFiltered: 0,
-          contactsExtracted: 0,
-          activity: `Already in this spreadsheet: ${fromHeader}`,
-        });
-      }
-
-      if (existingLog.status === "contact_extracted") {
-        const { data: existingContact, error: existingContactError } =
-          await supabase
-            .from("extracted_contacts")
-            .select(
-              "id, email, first_name, last_name, phone, title, address, sheet_written, sheet_written_to"
-            )
-            .eq("connection_id", connection.id)
-            .eq("message_id", messageRef.id)
-            .maybeSingle();
-
-        if (existingContactError) {
-          throw new Error(
-            `Could not load the existing contact: ${existingContactError.message}`
-          );
-        }
-
-        if (!existingContact) {
-          throw new Error(
-            "The email was marked as processed, but its contact record is missing."
-          );
-        }
-
-        const existingSheetContact = await findExistingContactInSpreadsheet(
-          sheets,
-          connection.target_sheet_id,
-          {
-            email: existingContact.email || extractEmailAddress(fromHeader),
-            firstName: existingContact.first_name,
-            lastName: existingContact.last_name,
-            phone: existingContact.phone,
-          }
-        );
-
-        let addedToSpreadsheet = false;
-
-        if (!existingSheetContact.found) {
-          await assertRunActive(supabase, runId, user.id);
-
-          stage = "syncing existing contact to Google Sheet";
-
-          await sheets.spreadsheets.values.append({
-            spreadsheetId: connection.target_sheet_id,
-            range: `'${activeContactsTab.replace(/'/g, "''")}'!A:H`,
-            valueInputOption: "USER_ENTERED",
-            requestBody: {
-              values: [[
-                existingContact.first_name || "",
-                existingContact.last_name || "",
-                existingContact.email || "",
-                existingContact.phone || "",
-                "",
-                existingContact.title || "",
-                existingContact.address || "",
-                fromHeader,
-              ]],
-            },
-          });
-
-          const { error: markSheetError } = await supabase
-            .from("extracted_contacts")
-            .update({
-              sheet_written: true,
-              sheet_written_to: `${connection.target_sheet_id}:${activeContactsTabId}`,
-            })
-            .eq("id", existingContact.id)
-            .eq("connection_id", connection.id);
-
-          if (markSheetError) {
-            throw new Error(
-              `Could not mark the contact as written: ${markSheetError.message}`
-            );
-          }
-
-          addedToSpreadsheet = true;
-        }
-
-        const { data: currentRun } = await supabase
-          .from("tool_runs")
-          .select("emails_scanned, bots_filtered, contacts_extracted")
-          .eq("id", runId)
-          .single();
-
-        await supabase
-          .from("tool_runs")
-          .update({
-            emails_scanned: (currentRun?.emails_scanned || 0) + 1,
-            contacts_extracted:
-              (currentRun?.contacts_extracted || 0) + (addedToSpreadsheet ? 1 : 0),
-          })
-          .eq("id", runId)
-          .eq("user_id", user.id);
-
-        return NextResponse.json({
-          done: false,
-          scanned: 1,
-          botsFiltered: 0,
-          contactsExtracted: addedToSpreadsheet ? 1 : 0,
-          activity: addedToSpreadsheet
-            ? `Added existing contact to Contacts: ${fromHeader}`
-            : `Already in spreadsheet: ${fromHeader}`,
-        });
-      }
-
-      const { data: currentRun } = await supabase
-          .from("tool_runs")
-          .select("emails_scanned, bots_filtered, contacts_extracted")
-          .eq("id", runId)
-          .single();
-
-        await supabase
-          .from("tool_runs")
-          .update({
-            emails_scanned: (currentRun?.emails_scanned || 0) + 1,
-            contacts_extracted:
-              (currentRun?.contacts_extracted || 0) + (addedToThisSheet ? 1 : 0),
-          })
-          .eq("id", runId)
-          .eq("user_id", user.id);
-
-        return NextResponse.json({
-          done: false,
-          scanned: 1,
-          botsFiltered: 0,
-          contactsExtracted: addedToThisSheet ? 1 : 0,
-          activity: addedToThisSheet
-            ? `Added existing contact to this Sheet: ${fromHeader}`
-            : `Already in this Sheet: ${fromHeader}`,
-        });
-      }
-
-      const { data: currentRun } = await supabase
-        .from("tool_runs")
-        .select("emails_scanned, bots_filtered, contacts_extracted")
-        .eq("id", runId)
-        .single();
-
-      await supabase
-        .from("tool_runs")
-        .update({
-          emails_scanned: (currentRun?.emails_scanned || 0) + 1,
-        })
-        .eq("id", runId)
-        .eq("user_id", user.id);
-
-      return NextResponse.json({
-        done: false,
-        scanned: 1,
-        botsFiltered: 0,
-        contactsExtracted: 0,
-        activity: `Already processed email: ${fromHeader}`,
-      });
-    }
-
-    await assertRunActive(supabase, runId, user.id);
-
-    stage = "checking Google Sheet for existing contact";
-
-    const senderEmail = extractEmailAddress(fromHeader);
-
-    if (senderEmail) {
-      const existingSheetContact = await findExistingContactInSpreadsheet(
-        sheets,
-        connection.target_sheet_id,
-        { email: senderEmail }
+      throw new Error(
+        "Could not check email history: " + existingLogError.message
       );
-
-      if (existingSheetContact.found) {
-        await assertRunActive(supabase, runId, user.id);
-
-        stage = "recording contact already in Google Sheet";
-
-        const { error: existingSheetLogError } = await supabase
-          .from("email_logs")
-          .upsert(
-            {
-              connection_id: connection.id,
-              run_id: runId,
-              message_id: messageRef.id,
-              status: "contact_already_in_sheet",
-            },
-            { onConflict: "connection_id,message_id" }
-          );
-
-        if (existingSheetLogError) {
-          throw new Error(
-            `Could not record existing Sheet contact: ${existingSheetLogError.message}`
-          );
-        }
-
-        await gmail.users.messages.modify({
-          userId: "me",
-          id: messageRef.id,
-          requestBody: { addLabelIds: [labelId] },
-        });
-
-        const { data: currentRun } = await supabase
-          .from("tool_runs")
-          .select("emails_scanned, bots_filtered, contacts_extracted")
-          .eq("id", runId)
-          .single();
-
-        await supabase
-          .from("tool_runs")
-          .update({
-            emails_scanned: (currentRun?.emails_scanned || 0) + 1,
-          })
-          .eq("id", runId)
-          .eq("user_id", user.id);
-
-        return NextResponse.json({
-          done: false,
-          scanned: 1,
-          botsFiltered: 0,
-          contactsExtracted: 0,
-          activity: `Already in this Sheet: ${fromHeader}`,
-        });
-      }
     }
 
-    stage = "classifying sender";
-
-    const isHuman = await checkIfSenderIsHuman(fromHeader);
-
-    if (!isHuman) {
-      stage = "recording filtered email";
-
-      const { error: logError } = await supabase
-        .from("email_logs")
-        .upsert(
-          {
-            connection_id: connection.id,
-            run_id: runId,
-            message_id: messageRef.id,
-            status: "bot_filtered",
-          },
-          { onConflict: "connection_id,message_id" }
-        );
-
-      if (logError) {
-        throw new Error(`Could not write email log: ${logError.message}`);
-      }
-
-      stage = "labeling filtered email";
-
-      await gmail.users.messages.modify({
-        userId: "me",
-        id: messageRef.id,
-        requestBody: { addLabelIds: [labelId] },
+    if (existingLog?.status === "bot_filtered") {
+      await markLabel(gmail, messageId, labelId);
+      await incrementRun(supabase, runId, user.id, {
+        scanned: 1,
+        filtered: 1,
       });
-
-      const { data: currentRun } = await supabase
-        .from("tool_runs")
-        .select("emails_scanned, bots_filtered, contacts_extracted")
-        .eq("id", runId)
-        .single();
-
-      await supabase
-        .from("tool_runs")
-        .update({
-          emails_scanned: (currentRun?.emails_scanned || 0) + 1,
-          bots_filtered: (currentRun?.bots_filtered || 0) + 1,
-        })
-        .eq("id", runId)
-        .eq("user_id", user.id);
 
       return NextResponse.json({
         done: false,
         scanned: 1,
         botsFiltered: 1,
         contactsExtracted: 0,
-        activity: `Filtered non-human sender: ${fromHeader}`,
+        activity: "Already filtered: " + fromHeader,
+      });
+    }
+
+    if (existingLog?.status === "contact_already_in_sheet") {
+      await markLabel(gmail, messageId, labelId);
+      await incrementRun(supabase, runId, user.id, {
+        scanned: 1,
+      });
+
+      return NextResponse.json({
+        done: false,
+        scanned: 1,
+        botsFiltered: 0,
+        contactsExtracted: 0,
+        activity: "Already in spreadsheet: " + fromHeader,
+      });
+    }
+
+    const senderEmail = extractEmailAddress(fromHeader);
+
+    stage = "checking spreadsheet for existing contact";
+
+    const sheetMatchBeforeExtraction = await findExistingContactInSpreadsheet(
+      sheets,
+      connection.target_sheet_id,
+      { email: senderEmail }
+    );
+
+    if (sheetMatchBeforeExtraction.found) {
+      await assertRunActive(supabase, runId, user.id);
+
+      stage = "recording spreadsheet duplicate";
+
+      await recordEmail(
+        supabase,
+        connection.id,
+        runId,
+        messageId,
+        "contact_already_in_sheet"
+      );
+
+      await markLabel(gmail, messageId, labelId);
+
+      await incrementRun(supabase, runId, user.id, {
+        scanned: 1,
+      });
+
+      return NextResponse.json({
+        done: false,
+        scanned: 1,
+        botsFiltered: 0,
+        contactsExtracted: 0,
+        activity: "Already in spreadsheet: " + fromHeader,
       });
     }
 
     await assertRunActive(supabase, runId, user.id);
 
-    stage = "checking saved contact";
+    stage = "classifying sender";
 
-    const { data: savedContact, error: savedContactError } = await supabase
-      .from("extracted_contacts")
-      .select(
-        "id, email, first_name, last_name, phone, title, address, sheet_written, sheet_written_to"
-      )
-      .eq("connection_id", connection.id)
-      .eq("message_id", messageRef.id)
-      .maybeSingle();
+    const human = await classifySender(fromHeader);
 
-    if (savedContactError) {
-      throw new Error(
-        `Could not check saved contact: ${savedContactError.message}`
-      );
-    }
+    if (!human) {
+      stage = "recording filtered email";
 
-    let contact = savedContact;
-
-    if (!contact) {
-      await assertRunActive(supabase, runId, user.id);
-
-      stage = "extracting contact";
-
-      const extracted = await extractContactDetails(
-        fromHeader,
-        subject,
-        snippet
+      await recordEmail(
+        supabase,
+        connection.id,
+        runId,
+        messageId,
+        "bot_filtered"
       );
 
-      stage = "saving extracted contact";
+      await markLabel(gmail, messageId, labelId);
 
-      const { data: upsertedContact, error: contactError } = await supabase
-        .from("extracted_contacts")
-        .upsert(
-          {
-            connection_id: connection.id,
-            message_id: messageRef.id,
-            run_id: runId,
-            email: extracted.email || "",
-            first_name: extracted.first_name,
-            last_name: extracted.last_name,
-            phone: extracted.phone,
-            title: extracted.title,
-            address: extracted.address,
-            sheet_written: false,
-            sheet_written_to: null,
-          },
-          { onConflict: "connection_id,message_id" }
-        )
-        .select(
-          "id, email, first_name, last_name, phone, title, address, sheet_written, sheet_written_to"
-        )
-        .single();
-
-      if (contactError || !upsertedContact) {
-        throw new Error(
-          `Could not save extracted contact: ${contactError?.message || "No contact row returned."}`
-        );
-      }
-
-      contact = upsertedContact;
-    }
-
-    if (!contact.sheet_written) {
-      await assertRunActive(supabase, runId, user.id);
-
-      stage = "checking Google Sheet for duplicate contact";
-
-      const existingSheetContact = await findExistingContactInSpreadsheet(
-        sheets,
-        connection.target_sheet_id,
-        {
-          email: contact.email || senderEmail,
-          firstName: contact.first_name,
-          lastName: contact.last_name,
-          phone: contact.phone,
-        }
-      );
-
-      if (existingSheetContact.found) {
-        const { error: markExistingError } = await supabase
-          .from("extracted_contacts")
-          .update({
-            sheet_written: true,
-            sheet_written_to: `${connection.target_sheet_id}:${activeContactsTabId}`,
-          })
-          .eq("id", contact.id)
-          .eq("connection_id", connection.id);
-
-        if (markExistingError) {
-          throw new Error(
-            `Could not mark existing Sheet contact: ${markExistingError.message}`
-          );
-        }
-
-        await assertRunActive(supabase, runId, user.id);
-
-        stage = "recording processed email";
-
-        const { error: existingEmailLogError } = await supabase
-          .from("email_logs")
-          .upsert(
-            {
-              connection_id: connection.id,
-              run_id: runId,
-              message_id: messageRef.id,
-              status: "contact_already_in_sheet",
-            },
-            { onConflict: "connection_id,message_id" }
-          );
-
-        if (existingEmailLogError) {
-          throw new Error(
-            `Could not record existing Sheet contact: ${existingEmailLogError.message}`
-          );
-        }
-
-        await gmail.users.messages.modify({
-          userId: "me",
-          id: messageRef.id,
-          requestBody: { addLabelIds: [labelId] },
-        });
-
-        const { data: currentRun } = await supabase
-          .from("tool_runs")
-          .select("emails_scanned, bots_filtered, contacts_extracted")
-          .eq("id", runId)
-          .single();
-
-        await supabase
-          .from("tool_runs")
-          .update({
-            emails_scanned: (currentRun?.emails_scanned || 0) + 1,
-          })
-          .eq("id", runId)
-          .eq("user_id", user.id);
-
-        return NextResponse.json({
-          done: false,
-          scanned: 1,
-          botsFiltered: 0,
-          contactsExtracted: 0,
-          activity: `Already in this Sheet: ${fromHeader}`,
-        });
-      }
-
-      stage = "writing contact to Google Sheet";
-
-      await sheets.spreadsheets.values.append({
-        spreadsheetId: connection.target_sheet_id,
-        range: `'${activeContactsTab.replace(/'/g, "''")}'!A:H`,
-        valueInputOption: "USER_ENTERED",
-        requestBody: {
-          values: [[
-            contact.first_name || "",
-            contact.last_name || "",
-            contact.email || "",
-            contact.phone || "",
-            "",
-            contact.title || "",
-            contact.address || "",
-            fromHeader,
-          ]],
-        },
+      await incrementRun(supabase, runId, user.id, {
+        scanned: 1,
+        filtered: 1,
       });
 
-      await assertRunActive(supabase, runId, user.id);
+      return NextResponse.json({
+        done: false,
+        scanned: 1,
+        botsFiltered: 1,
+        contactsExtracted: 0,
+        activity: "Filtered non-human sender: " + fromHeader,
+      });
+    }
 
-      stage = "marking contact written";
+    await assertRunActive(supabase, runId, user.id);
 
-      const { error: markWrittenError } = await supabase
-        .from("extracted_contacts")
-        .update({
-          sheet_written: true,
-          sheet_written_to: connection.target_sheet_id,
-        })
-        .eq("id", contact.id)
-        .eq("connection_id", connection.id);
+    stage = "extracting contact";
 
-      if (markWrittenError) {
-        throw new Error(
-          `Could not mark contact as written: ${markWrittenError.message}`
-        );
+    const extracted = await extractContact(fromHeader, subject, snippet);
+
+    const extractedEmail =
+      typeof extracted.email === "string" && extracted.email.trim()
+        ? extracted.email.trim().toLowerCase()
+        : senderEmail;
+
+    const candidate = {
+      firstName: extracted.first_name || null,
+      lastName: extracted.last_name || null,
+      email: extractedEmail || null,
+      phone: extracted.phone || null,
+    };
+
+    stage = "checking spreadsheet after extraction";
+
+    const sheetMatchAfterExtraction = await findExistingContactInSpreadsheet(
+      sheets,
+      connection.target_sheet_id,
+      candidate
+    );
+
+    if (sheetMatchAfterExtraction.found) {
+      await recordEmail(
+        supabase,
+        connection.id,
+        runId,
+        messageId,
+        "contact_already_in_sheet"
+      );
+
+      await markLabel(gmail, messageId, labelId);
+
+      await incrementRun(supabase, runId, user.id, {
+        scanned: 1,
+      });
+
+      return NextResponse.json({
+        done: false,
+        scanned: 1,
+        botsFiltered: 0,
+        contactsExtracted: 0,
+        activity: "Already in spreadsheet after extraction: " + fromHeader,
+      });
+    }
+
+    await assertRunActive(supabase, runId, user.id);
+
+    stage = "saving extracted contact";
+
+    const { data: savedContact, error: contactError } = await supabase
+      .from("extracted_contacts")
+      .upsert(
+        {
+          connection_id: connection.id,
+          message_id: messageId,
+          run_id: runId,
+          email: extractedEmail || "",
+          first_name: extracted.first_name || null,
+          last_name: extracted.last_name || null,
+          phone: extracted.phone || null,
+          title: extracted.title || null,
+          address: extracted.address || null,
+          sheet_written: false,
+          sheet_written_to: null,
+        },
+        { onConflict: "connection_id,message_id" }
+      )
+      .select(
+        "id, email, first_name, last_name, phone, title, address, sheet_written"
+      )
+      .single();
+
+    if (contactError || !savedContact) {
+      throw new Error(
+        "Could not save extracted contact: " +
+          (contactError?.message || "No contact row returned.")
+      );
+    }
+
+    await assertRunActive(supabase, runId, user.id);
+
+    stage = "writing contact to Google Sheet";
+
+    await appendContact(
+      sheets,
+      connection.target_sheet_id,
+      contactsTab.title,
+      {
+        first_name: savedContact.first_name,
+        last_name: savedContact.last_name,
+        email: savedContact.email,
+        phone: savedContact.phone,
+        title: savedContact.title,
+        address: savedContact.address,
+        source: fromHeader,
       }
+    );
+
+    await assertRunActive(supabase, runId, user.id);
+
+    stage = "marking contact written";
+
+    const { error: markError } = await supabase
+      .from("extracted_contacts")
+      .update({
+        sheet_written: true,
+        sheet_written_to:
+          connection.target_sheet_id + ":" + String(contactsTab.tabId),
+      })
+      .eq("id", savedContact.id)
+      .eq("connection_id", connection.id);
+
+    if (markError) {
+      throw new Error("Could not mark contact as written: " + markError.message);
     }
 
     await assertRunActive(supabase, runId, user.id);
 
     stage = "recording processed email";
 
-    const { error: emailLogError } = await supabase.from("email_logs").insert({
-      connection_id: connection.id,
-      run_id: runId,
-      message_id: messageRef.id,
-      status: "contact_extracted",
+    await recordEmail(
+      supabase,
+      connection.id,
+      runId,
+      messageId,
+      "contact_extracted"
+    );
+
+    await markLabel(gmail, messageId, labelId);
+
+    await incrementRun(supabase, runId, user.id, {
+      scanned: 1,
+      contacts: 1,
     });
-
-    if (emailLogError) {
-      throw new Error(`Could not write email log: ${emailLogError.message}`);
-    }
-
-    await assertRunActive(supabase, runId, user.id);
-
-    stage = "labeling processed email";
-
-    await gmail.users.messages.modify({
-      userId: "me",
-      id: messageRef.id,
-      requestBody: { addLabelIds: [labelId] },
-    });
-
-    const { data: currentRun } = await supabase
-      .from("tool_runs")
-      .select("emails_scanned, bots_filtered, contacts_extracted")
-      .eq("id", runId)
-      .single();
-
-    await supabase
-      .from("tool_runs")
-      .update({
-        emails_scanned: (currentRun?.emails_scanned || 0) + 1,
-        contacts_extracted: (currentRun?.contacts_extracted || 0) + 1,
-      })
-      .eq("id", runId)
-      .eq("user_id", user.id);
 
     return NextResponse.json({
       done: false,
       scanned: 1,
       botsFiltered: 0,
       contactsExtracted: 1,
-      activity: `Extracted contact from: ${fromHeader}`,
+      activity: "Extracted contact from: " + fromHeader,
     });
   } catch (error) {
     if (error instanceof RunCancelledError) {
@@ -893,61 +716,69 @@ export async function POST(req: Request) {
       });
     }
 
-    console.error("Run step failed", { stage, error });
+    console.error("Run step failed", {
+      runId,
+      stage,
+      error,
+    });
 
-    try {
-      const supabase = createSupabase();
+    const message = errorMessage(error);
+    const supabase = createSupabase();
 
+    if (runId) {
+      await supabase
+        .from("tool_runs")
+        .update({
+          status: "failed",
+          completed_at: new Date().toISOString(),
+        })
+        .eq("id", runId)
+        .eq("user_id", user.id)
+        .then(() => undefined)
+        .catch(() => undefined);
+    }
+
+    const lower = message.toLowerCase();
+
+    if (
+      lower.includes("invalid_grant") ||
+      lower.includes("invalid grant") ||
+      lower.includes("token has been expired") ||
+      lower.includes("token has been revoked")
+    ) {
       if (runId) {
-        await supabase
+        const { data: failedRun } = await supabase
           .from("tool_runs")
-          .update({
-            status: "failed",
-            completed_at: new Date().toISOString(),
-          })
+          .select("connection_id")
           .eq("id", runId)
-          .eq("user_id", user.id);
+          .eq("user_id", user.id)
+          .maybeSingle();
+
+        if (failedRun?.connection_id) {
+          await supabase
+            .from("google_connections")
+            .update({ is_active: false })
+            .eq("id", failedRun.connection_id)
+            .eq("user_id", user.id);
+        }
       }
 
-      const message = errorMessage(error);
-
-      if (
-        message.toLowerCase().includes("invalid_grant") ||
-        message.toLowerCase().includes("invalid grant") ||
-        message.toLowerCase().includes("token has been expired") ||
-        message.toLowerCase().includes("token has been revoked")
-      ) {
-        // Do not keep showing "Connected" when Google has rejected the
-        // stored refresh token. The user must authorize Gmail again.
-        await supabase
-          .from("google_connections")
-          .update({
-            is_active: false,
-          })
-          .eq("id", runId ? (await supabase
-            .from("tool_runs")
-            .select("connection_id")
-            .eq("id", runId)
-            .eq("user_id", user.id)
-            .maybeSingle()).data?.connection_id : "")
-          .eq("user_id", user.id);
-
-        return NextResponse.json(
-          {
-            error:
-              "Your Gmail authorization has expired or been revoked. Reconnect Gmail before running the extractor again.",
-            authRequired: true,
-          },
-          { status: 401 }
-        );
-      }
-    } catch {}
+      return NextResponse.json(
+        {
+          error:
+            "Your Google authorization has expired or been revoked. Reconnect Gmail and approve access again.",
+          authRequired: true,
+        },
+        { status: 401 }
+      );
+    }
 
     return NextResponse.json(
       {
-        error: `Run failed while ${stage}: ${errorMessage(error)}`,
+        error: "Run failed while " + stage + ": " + message,
         stage,
       },
       { status: 500 }
     );
   }
+}
