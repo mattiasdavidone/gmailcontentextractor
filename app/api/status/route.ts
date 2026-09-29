@@ -18,7 +18,7 @@ export async function GET() {
 
   let { data, error } = await supabase
     .from("google_connections")
-    .select("id, google_email, target_sheet_id, is_active, user_id")
+    .select("id, google_email, target_sheet_id, target_sheet_tab_name, is_active, user_id")
     .eq("user_id", user.id)
     .eq("is_active", true)
     .limit(1)
@@ -30,7 +30,7 @@ export async function GET() {
   if (!data && !error) {
     const fallback = await supabase
       .from("google_connections")
-      .select("id, google_email, target_sheet_id, is_active, user_id")
+      .select("id, google_email, target_sheet_id, target_sheet_tab_name, is_active, user_id")
       .eq("google_email", user.email)
       .eq("is_active", true)
       .is("user_id", null)
@@ -42,7 +42,7 @@ export async function GET() {
         .from("google_connections")
         .update({ user_id: user.id })
         .eq("id", fallback.data.id)
-        .select("id, google_email, target_sheet_id, is_active, user_id")
+        .select("id, google_email, target_sheet_id, target_sheet_tab_name, is_active, user_id")
         .single();
 
       if (!claimError) {
@@ -65,6 +65,7 @@ export async function GET() {
       connected: Boolean(data),
       email: data?.google_email ?? null,
       sheetId: data?.target_sheet_id ?? null,
+      sheetTabName: data?.target_sheet_tab_name ?? null,
       accountEmail: user.email,
     },
     { headers: { "Cache-Control": "no-store" } }
