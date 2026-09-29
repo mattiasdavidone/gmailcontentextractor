@@ -3,7 +3,6 @@ import { createClient } from "@supabase/supabase-js";
 import { google } from "googleapis";
 import { getCurrentUser } from "@/lib/auth";
 import {
-  CONTACT_HEADERS,
   ensureContactsTab,
   normalizeEmail,
   readContactsRows,
