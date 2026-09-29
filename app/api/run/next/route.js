@@ -268,7 +268,7 @@ async function findContactForMessage(supabase, connectionId, messageId) {
   const { data, error } = await supabase
     .from("extracted_contacts")
     .select(
-      "id, email, first_name, last_name, phone, title, address, normalized_email, sheet_written, sheet_written_to, message_id"
+      "id, email, first_name, last_name, phone, fax, title, address, normalized_email, sheet_written, sheet_written_to, message_id"
     )
     .eq("connection_id", connectionId)
     .eq("message_id", messageId)
@@ -326,6 +326,7 @@ async function saveExtractedContact(
     p_first_name: contact.first_name || null,
     p_last_name: contact.last_name || null,
     p_phone: contact.phone || null,
+    p_fax: contact.fax || null,
     p_title: contact.title || null,
     p_address: contact.address || null,
   });
@@ -554,6 +555,7 @@ async function writeContactToSheet(
     last_name: contact.last_name,
     email: contact.email,
     phone: contact.phone,
+    fax: contact.fax,
     title: contact.title,
     address: contact.address,
     source,
@@ -940,6 +942,7 @@ export async function POST(req) {
       first_name: extracted.first_name || null,
       last_name: extracted.last_name || null,
       phone: extracted.phone || null,
+      fax: extracted.fax || null,
       title: extracted.title || null,
       address: extracted.address || null,
     };
