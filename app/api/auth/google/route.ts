@@ -1,8 +1,15 @@
 import { NextRequest, NextResponse } from "next/server";
 import { google } from "googleapis";
 import { createClient } from "@supabase/supabase-js";
+import { getCurrentUser } from "@/lib/auth";
 
 export async function GET(req: NextRequest) {
+  const user = await getCurrentUser();
+
+  if (!user) {
+    return NextResponse.redirect(new URL("/login", req.url));
+  }
+
   const redirectUri = new URL(
     "/api/auth/callback/google",
     req.url
@@ -19,6 +26,7 @@ export async function GET(req: NextRequest) {
     const { data: connection } = await supabase
       .from("google_connections")
       .select("refresh_token")
+      .eq("user_id", user.id)
       .eq("is_active", true)
       .limit(1)
       .maybeSingle();
@@ -32,10 +40,7 @@ export async function GET(req: NextRequest) {
 
       try {
         await revokeClient.revokeToken(connection.refresh_token);
-      } catch {
-        // The token may already be revoked or expired. Continue with
-        // a fresh consent request below.
-      }
+      } catch {}
     }
   }
 
