@@ -1,7 +1,3 @@
-create unique index if not exists tool_runs_one_active_per_connection
-on public.tool_runs (connection_id)
-where status = 'running';
-
 create or replace function public.enqueue_run_email_jobs(
   p_run_id uuid,
   p_connection_id uuid,
