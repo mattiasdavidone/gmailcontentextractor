@@ -361,12 +361,95 @@ export async function POST(req: Request) {
       }
 
       if (existingLog.status === "contact_extracted") {
+        const { data: existingContact, error: existingContactError } =
+          await supabase
+            .from("extracted_contacts")
+            .select(
+              "id, email, first_name, last_name, phone, title, address, sheet_written, sheet_written_to"
+            )
+            .eq("connection_id", connection.id)
+            .eq("message_id", messageRef.id)
+            .maybeSingle();
+
+        if (existingContactError) {
+          throw new Error(
+            `Could not load the existing contact: ${existingContactError.message}`
+          );
+        }
+
+        if (!existingContact) {
+          throw new Error(
+            "The email was marked as processed, but its contact record is missing."
+          );
+        }
+
+        let addedToThisSheet = false;
+
+        if (existingContact.sheet_written_to !== connection.target_sheet_id) {
+          await assertRunActive(supabase, runId, user.id);
+
+          stage = "syncing existing contact to Google Sheet";
+
+          await sheets.spreadsheets.values.append({
+            spreadsheetId: connection.target_sheet_id,
+            range: "Contacts!A:H",
+            valueInputOption: "USER_ENTERED",
+            requestBody: {
+              values: [[
+                existingContact.first_name || "",
+                existingContact.last_name || "",
+                existingContact.email || "",
+                existingContact.phone || "",
+                "",
+                existingContact.title || "",
+                existingContact.address || "",
+                fromHeader,
+              ]],
+            },
+          });
+
+          const { error: markSheetError } = await supabase
+            .from("extracted_contacts")
+            .update({
+              sheet_written: true,
+              sheet_written_to: connection.target_sheet_id,
+            })
+            .eq("id", existingContact.id)
+            .eq("connection_id", connection.id);
+
+          if (markSheetError) {
+            throw new Error(
+              `Could not mark the contact as written: ${markSheetError.message}`
+            );
+          }
+
+          addedToThisSheet = true;
+        }
+
+        const { data: currentRun } = await supabase
+          .from("tool_runs")
+          .select("emails_scanned, bots_filtered, contacts_extracted")
+          .eq("id", runId)
+          .single();
+
+        await supabase
+          .from("tool_runs")
+          .update({
+            emails_scanned: (currentRun?.emails_scanned || 0) + 1,
+            contacts_extracted:
+              (currentRun?.contacts_extracted || 0) + (addedToThisSheet ? 1 : 0),
+          })
+          .eq("id", runId)
+          .eq("user_id", user.id);
+
         return NextResponse.json({
           done: false,
           scanned: 1,
           botsFiltered: 0,
-          contactsExtracted: 1,
-          activity: `Already processed: ${fromHeader}`,
+          contactsExtracted: addedToThisSheet ? 1 : 0,
+          activity: addedToThisSheet
+            ? `Added existing contact to this Sheet: ${fromHeader}`
+            : `Already in this Sheet: ${fromHeader}`,
         });
       }
 
@@ -457,7 +540,7 @@ export async function POST(req: Request) {
     const { data: savedContact, error: savedContactError } = await supabase
       .from("extracted_contacts")
       .select(
-        "id, email, first_name, last_name, phone, title, address, sheet_written"
+        "id, email, first_name, last_name, phone, title, address, sheet_written, sheet_written_to"
       )
       .eq("connection_id", connection.id)
       .eq("message_id", messageRef.id)
@@ -498,11 +581,12 @@ export async function POST(req: Request) {
             title: extracted.title,
             address: extracted.address,
             sheet_written: false,
+            sheet_written_to: null,
           },
           { onConflict: "connection_id,message_id" }
         )
         .select(
-          "id, email, first_name, last_name, phone, title, address, sheet_written"
+          "id, email, first_name, last_name, phone, title, address, sheet_written, sheet_written_to"
         )
         .single();
 
@@ -544,7 +628,10 @@ export async function POST(req: Request) {
 
       const { error: markWrittenError } = await supabase
         .from("extracted_contacts")
-        .update({ sheet_written: true })
+        .update({
+          sheet_written: true,
+          sheet_written_to: connection.target_sheet_id,
+        })
         .eq("id", contact.id)
         .eq("connection_id", connection.id);
 
