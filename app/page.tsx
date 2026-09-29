@@ -17,14 +17,6 @@ type Activity = {
   tone?: "normal" | "success" | "warning" | "error";
 };
 
-type StatusResponse = {
-  connected: boolean;
-  email: string | null;
-  sheetId: string | null;
-  sheetTabName: string | null;
-  accountEmail: string;
-};
-
 const EMPTY_STATS: Stats = {
   totalScanned: 0,
   botsFiltered: 0,
@@ -64,7 +56,10 @@ export default function Dashboard() {
       "Google connection could not be completed. Please try again.";
 
     if (justConnected) {
-      addActivity("Gmail authorization completed. Checking the connection...", "success");
+      addActivity(
+        "Gmail authorization completed. Checking the connection...",
+        "success"
+      );
     }
 
     if (googleError) {
@@ -190,7 +185,9 @@ export default function Dashboard() {
       );
     } catch (error) {
       const message =
-        error instanceof Error ? error.message : "Unable to save the spreadsheet.";
+        error instanceof Error
+          ? error.message
+          : "Unable to save the spreadsheet.";
 
       setErrorMessage(message);
       addActivity(message, "error");
@@ -226,9 +223,7 @@ export default function Dashboard() {
       const startData = startRaw ? JSON.parse(startRaw) : {};
 
       if (!startResponse.ok) {
-        throw new Error(
-          startData.error || "Unable to start the run."
-        );
+        throw new Error(startData.error || "Unable to start the run.");
       }
 
       runningRef.current = true;
@@ -288,7 +283,7 @@ export default function Dashboard() {
         ) {
           const retryAfterSeconds = Math.max(
             1,
-            Math.min(15, Number(data.retryAfterSeconds) || 5)
+            Math.min(30, Number(data.retryAfterSeconds) || 15)
           );
 
           addActivity(
@@ -312,7 +307,8 @@ export default function Dashboard() {
         );
 
         if (response.status === 429 && data.quotaLimited) {
-          (extractionError as Error & { quotaLimited?: boolean }).quotaLimited = true;
+          (extractionError as Error & { quotaLimited?: boolean }).quotaLimited =
+            true;
         }
 
         throw extractionError;
@@ -345,7 +341,11 @@ export default function Dashboard() {
       if (data.activity) {
         addActivity(
           data.activity,
-          data.botsFiltered ? "warning" : data.contactsExtracted ? "success" : "normal"
+          data.botsFiltered
+            ? "warning"
+            : data.contactsExtracted
+              ? "success"
+              : "normal"
         );
       }
 
@@ -353,37 +353,37 @@ export default function Dashboard() {
     } catch (error) {
       if (signal.aborted || !runningRef.current) return;
 
+      const activeRunId = runIdRef.current;
       runningRef.current = false;
       abortRef.current = null;
       runIdRef.current = null;
       setRunState("error");
 
-      const message =
-        error instanceof Error ? error.message : "The extraction failed.";
-
-      if (
+      const isQuotaLimited =
         error instanceof Error &&
-        (error as Error & { quotaLimited?: boolean }).quotaLimited
-      ) {
-        const runIdToCancel = runIdRef.current;
+        (error as Error & { quotaLimited?: boolean }).quotaLimited;
 
-        if (runIdToCancel) {
-          void fetch("/api/run/cancel", {
+      if (isQuotaLimited) {
+        if (activeRunId) {
+          await fetch("/api/run/cancel", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ runId: runIdToCancel }),
-          });
+            body: JSON.stringify({ runId: activeRunId }),
+          }).catch(() => undefined);
         }
 
-        addActivity(
-          "Google Sheets quota did not recover after retries. The run was stopped safely; no email was marked complete.",
-          "error"
-        );
-      } else {
-        addActivity(message, "error");
-      }
+        const safeMessage =
+          "Google Sheets is rate-limiting requests. The run was stopped safely. Wait about a minute before trying again.";
 
-      setErrorMessage(message);
+        addActivity(safeMessage, "error");
+        setErrorMessage(safeMessage);
+      } else {
+        const message =
+          error instanceof Error ? error.message : "The extraction failed.";
+
+        addActivity(message, "error");
+        setErrorMessage(message);
+      }
     }
   }
 
@@ -439,7 +439,8 @@ export default function Dashboard() {
 
       if (!response.ok) {
         throw new Error(
-          data.error || `Unable to reset processing history (HTTP ${response.status}).`
+          data.error ||
+            `Unable to reset processing history (HTTP ${response.status}).`
         );
       }
 
@@ -453,14 +454,18 @@ export default function Dashboard() {
         {
           id: Date.now(),
           time: getTime(),
-          message: data.message || "Scanned status cleared. Ready for a fresh scan.",
+          message:
+            data.message ||
+            "Scanned status cleared. Ready for a fresh scan.",
           tone: "warning",
         },
       ]);
       setShowResetConfirm(false);
     } catch (error) {
       const message =
-        error instanceof Error ? error.message : "Unable to clear scanned status.";
+        error instanceof Error
+          ? error.message
+          : "Unable to clear scanned status.";
 
       setErrorMessage(message);
       addActivity(message, "error");
@@ -527,7 +532,6 @@ export default function Dashboard() {
             </button>
             <StatusBadge state={runState} />
           </div>
-
         </header>
 
         <section className="mb-5 rounded-lg border border-[var(--border)] bg-white">
@@ -555,7 +559,6 @@ export default function Dashboard() {
               >
                 Stop
               </button>
-
             </div>
           </div>
 
@@ -589,7 +592,7 @@ export default function Dashboard() {
               <button
                 onClick={() => connectGmail(connected)}
                 disabled={runState === "running"}
-               className="rounded-md border border-[var(--border)] bg-white px-3 py-2 text-[12px] font-medium transition hover:bg-[var(--surface-muted)] disabled:cursor-not-allowed disabled:opacity-50"
+                className="rounded-md border border-[var(--border)] bg-white px-3 py-2 text-[12px] font-medium transition hover:bg-[var(--surface-muted)] disabled:cursor-not-allowed disabled:opacity-50"
               >
                 {connected ? "Reconnect" : "Connect Gmail"}
               </button>
@@ -797,10 +800,10 @@ function StatusBadge({ state }: { state: RunState }) {
           state === "running"
             ? "bg-[var(--warning)]"
             : state === "complete"
-            ? "bg-[var(--success)]"
-            : state === "error"
-            ? "bg-[var(--danger)]"
-            : "bg-[var(--faint)]",
+              ? "bg-[var(--success)]"
+              : state === "error"
+                ? "bg-[var(--danger)]"
+                : "bg-[var(--faint)]",
         ].join(" ")}
       />
       {getStateLabel(state)}
