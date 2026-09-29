@@ -23,7 +23,7 @@ jobs:
       - name: Capture current audit
         run: npm audit --json > audit-before-fix.json || true
       - name: Apply available package-lock fixes
-        run: npm audit fix --package-lock-only --force || true
+        run: npm audit fix --package-lock-only || true
       - name: Verify remaining vulnerabilities
         run: |
           npm audit --json > audit-after-fix.json || true
