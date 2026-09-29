@@ -342,16 +342,30 @@ async function saveExtractedContact(
   return row;
 }
 
+function sheetLocation(sheetId, tabId) {
+  return sheetId + ":" + String(tabId);
+}
+
+function isContactWrittenToCurrentSheet(contact, connection) {
+  return (
+    contact.sheet_written === true &&
+    typeof contact.sheet_written_to === "string" &&
+    typeof connection.target_sheet_id === "string" &&
+    typeof connection.target_sheet_tab_id === "number" &&
+    contact.sheet_written_to ===
+      sheetLocation(
+        connection.target_sheet_id,
+        connection.target_sheet_tab_id
+      )
+  );
+}
+
 function isPendingSheetWrite(contact) {
   return (
     !contact.sheet_written &&
     typeof contact.sheet_written_to === "string" &&
     contact.sheet_written_to.startsWith("pending:")
   );
-}
-
-function sheetLocation(sheetId, tabId) {
-  return sheetId + ":" + String(tabId);
 }
 
 function pendingSheetLocation(sheetId, tabId) {
@@ -441,7 +455,7 @@ async function writeContactToSheet(
   contact,
   source
 ) {
-  if (contact.sheet_written) return;
+  if (isContactWrittenToCurrentSheet(contact, connection)) return;
 
   const needsRecoveryCheck = isPendingSheetWrite(contact);
   let contactsTab;
@@ -835,7 +849,7 @@ export async function POST(req) {
     );
 
     if (messageContact) {
-      if (!messageContact.sheet_written) {
+      if (!isContactWrittenToCurrentSheet(messageContact, connection)) {
         stage = "recovering saved contact";
 
         const sheets = google.sheets({ version: "v4", auth, retry: false });
@@ -941,7 +955,7 @@ export async function POST(req) {
     if (knownContact) {
       stage = "recovering known contact";
 
-      if (!knownContact.sheet_written) {
+      if (!isContactWrittenToCurrentSheet(knownContact, connection)) {
         const sheets = google.sheets({ version: "v4", auth, retry: false });
 
         await writeContactToSheet(
@@ -990,7 +1004,7 @@ export async function POST(req) {
     // worker between our earlier duplicate check and this write. Treat that
     // case as a duplicate instead of counting it as a new contact.
     if (savedContact.message_id !== messageId) {
-      if (!savedContact.sheet_written) {
+      if (!isContactWrittenToCurrentSheet(savedContact, connection)) {
         const sheets = google.sheets({ version: "v4", auth, retry: false });
 
         await writeContactToSheet(
