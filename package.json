@@ -1,4 +1,12 @@
 {
+  "name": "gmailcontentextractor",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start"
+  },
   "dependencies": {
     "@supabase/supabase-js": "^2.48.0",
     "googleapis": "^144.0.0",
@@ -12,10 +20,8 @@
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",
-    "autoprefixer": "^10.4.20",
     "eslint": "^9",
     "eslint-config-next": "16.2.4",
-    "postcss": "^8.5.10",
     "tailwindcss": "^4.2.2",
     "typescript": "^5"
   }
