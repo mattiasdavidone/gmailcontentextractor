@@ -22,7 +22,12 @@ jobs:
       - name: Run npm audit
         continue-on-error: true
         run: npm audit --json > audit.json || true
-      - uses: actions/upload-artifact@v4
+      - name: Try automatic package-lock fixes
+        run: npm audit fix --package-lock-only --force || true
+      - name: Upload audit and lockfile
+        uses: actions/upload-artifact@v4
         with:
-          name: npm-audit
-          path: audit.json
+          name: npm-audit-fix
+          path: |
+            audit.json
+            package-lock.json
