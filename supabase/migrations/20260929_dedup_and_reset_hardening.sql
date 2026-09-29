@@ -34,9 +34,9 @@ begin
     if nullif(trim(coalesce(p_normalized_email, '')), '') is not null then
       select *
         into v_contact
-      from public.extracted_contacts
-      where connection_id = p_connection_id
-        and normalized_email = p_normalized_email
+      from public.extracted_contacts as c
+      where c.connection_id = p_connection_id
+        and c.normalized_email = p_normalized_email
       limit 1
       for update;
 
@@ -59,9 +59,9 @@ begin
 
     select *
       into v_contact
-    from public.extracted_contacts
-    where connection_id = p_connection_id
-      and message_id = p_message_id
+    from public.extracted_contacts as c
+    where c.connection_id = p_connection_id
+      and c.message_id = p_message_id
     limit 1
     for update;
 
