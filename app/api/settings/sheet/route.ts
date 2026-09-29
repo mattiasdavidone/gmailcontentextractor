@@ -2,7 +2,12 @@ import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { google } from "googleapis";
 import { getCurrentUser } from "@/lib/auth";
-import { createContactsTab } from "@/lib/google-sheets";
+import {
+  CONTACT_HEADERS,
+  ensureContactsTab,
+  normalizeEmail,
+  readContactsRows,
+} from "@/lib/google-sheets";
 
 function getSheetId(value: string) {
   const trimmed = value.trim();
@@ -31,6 +36,63 @@ function getGoogleError(error: any) {
     error?.message ||
     "Google Sheets rejected the request."
   );
+}
+
+async function importExistingContacts(
+  supabase: any,
+  sheets: ReturnType<typeof google.sheets>,
+  connectionId: string,
+  spreadsheetId: string,
+  tabId: number,
+  tabName: string
+) {
+  const rows = await readContactsRows(sheets, spreadsheetId, tabName);
+  const sheetWrittenTo = spreadsheetId + ":" + String(tabId);
+
+  const contacts = rows
+    .map((row) => ({
+      first_name: String(row[0] || "").trim() || null,
+      last_name: String(row[1] || "").trim() || null,
+      email: normalizeEmail(row[2]),
+      phone: String(row[3] || "").trim() || null,
+      title: String(row[5] || "").trim() || null,
+      address: String(row[6] || "").trim() || null,
+      message_id: String(row[8] || "").trim() || null,
+    }))
+    .filter((row) => row.email);
+
+  if (contacts.length === 0) return 0;
+
+  const payload = contacts.map((contact) => ({
+    connection_id: connectionId,
+    message_id: contact.message_id,
+    run_id: null,
+    email: contact.email,
+    normalized_email: contact.email,
+    first_name: contact.first_name,
+    last_name: contact.last_name,
+    phone: contact.phone,
+    title: contact.title,
+    address: contact.address,
+    sheet_written: true,
+    sheet_written_to: sheetWrittenTo,
+  }));
+
+  const { error } = await supabase
+    .from("extracted_contacts")
+    .upsert(payload, {
+      onConflict: "connection_id,normalized_email",
+      ignoreDuplicates: false,
+    });
+
+  if (error) {
+    throw new Error(
+      "The spreadsheet was linked, but existing contacts could not be imported: " +
+        error.message
+    );
+  }
+
+  return contacts.length;
 }
 
 export async function POST(req: NextRequest) {
@@ -69,14 +131,19 @@ export async function POST(req: NextRequest) {
 
   const { data: connection, error: lookupError } = await supabase
     .from("google_connections")
-    .select("id, google_email, refresh_token")
+    .select(
+      "id, google_email, refresh_token, target_sheet_id, target_sheet_tab_id, target_sheet_tab_name"
+    )
     .eq("user_id", user.id)
     .eq("is_active", true)
     .limit(1)
     .maybeSingle();
 
   if (lookupError) {
-    return NextResponse.json({ error: lookupError.message }, { status: 500 });
+    return NextResponse.json(
+      { error: lookupError.message },
+      { status: 500 }
+    );
   }
 
   if (!connection) {
@@ -93,31 +160,28 @@ export async function POST(req: NextRequest) {
 
   auth.setCredentials({ refresh_token: connection.refresh_token });
 
-  let title = "Google Sheet";
-  let spreadsheetUrl =
-    "https://docs.google.com/spreadsheets/d/" + sheetId + "/edit";
-
   try {
-    const token = await auth.getAccessToken();
-
-    if (!token.token) {
-      throw new Error(
-        "Google did not return an access token. Reconnect Gmail and approve Google Sheets access."
-      );
-    }
-
     const sheets = google.sheets({ version: "v4", auth });
 
-    const spreadsheet = await sheets.spreadsheets.get({
-      spreadsheetId: sheetId,
-      fields: "spreadsheetId,spreadsheetUrl,properties(title)",
-    });
+    const contactsTab = await ensureContactsTab(
+      sheets,
+      sheetId,
+      connection.target_sheet_id === sheetId
+        ? connection.target_sheet_tab_id
+        : null,
+      connection.target_sheet_id === sheetId
+        ? connection.target_sheet_tab_name
+        : null
+    );
 
-    title = spreadsheet.data.properties?.title || title;
-    spreadsheetUrl = spreadsheet.data.spreadsheetUrl || spreadsheetUrl;
-
-    // Every successful Save creates a fresh standardized output tab.
-    const contactsTab = await createContactsTab(sheets, sheetId);
+    const imported = await importExistingContacts(
+      supabase,
+      sheets,
+      connection.id,
+      sheetId,
+      contactsTab.tabId,
+      contactsTab.title
+    );
 
     const { error: updateError } = await supabase
       .from("google_connections")
@@ -131,7 +195,7 @@ export async function POST(req: NextRequest) {
 
     if (updateError) {
       throw new Error(
-        "The new Contacts tab was created, but the active tab could not be saved: " +
+        "The spreadsheet was checked, but the active tab could not be saved: " +
           updateError.message
       );
     }
@@ -142,8 +206,8 @@ export async function POST(req: NextRequest) {
         {
           user_id: user.id,
           spreadsheet_id: sheetId,
-          title,
-          spreadsheet_url: spreadsheetUrl,
+          title: contactsTab.spreadsheetTitle,
+          spreadsheet_url: contactsTab.spreadsheetUrl,
           last_used_at: new Date().toISOString(),
         },
         { onConflict: "user_id,spreadsheet_id" }
@@ -158,9 +222,10 @@ export async function POST(req: NextRequest) {
 
     return NextResponse.json({
       sheetId,
-      title,
-      spreadsheetUrl,
+      title: contactsTab.spreadsheetTitle,
+      spreadsheetUrl: contactsTab.spreadsheetUrl,
       tabName: contactsTab.title,
+      importedContacts: imported,
     });
   } catch (error) {
     console.error("Google Sheet save failed", {
@@ -175,6 +240,7 @@ export async function POST(req: NextRequest) {
     if (
       lower.includes("invalid_grant") ||
       lower.includes("invalid grant") ||
+      lower.includes("unauthorized") ||
       lower.includes("token")
     ) {
       return NextResponse.json(
@@ -199,6 +265,19 @@ export async function POST(req: NextRequest) {
             ", then paste the full Google Sheets link again.",
         },
         { status: 400 }
+      );
+    }
+
+    if (message.includes("429") || lower.includes("quota")) {
+      return NextResponse.json(
+        {
+          error:
+            "Google Sheets is temporarily rate-limiting the link. Wait a few seconds and try Save again.",
+        },
+        {
+          status: 429,
+          headers: { "Retry-After": "5" },
+        }
       );
     }
 
