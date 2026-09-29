@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { getCurrentUser } from "@/lib/auth";
+import { isCronRequest } from "@/lib/cron-auth";
 import { createGmailClient, listGmailMessageIds } from "@/lib/google-gmail";
 import {
   acquireRunWorker,
@@ -15,8 +16,9 @@ export const maxDuration = 60;
 const MAX_BATCH = 1000;
 
 export async function POST(req: Request) {
-  const user = await getCurrentUser();
-  if (!user) return NextResponse.json({ error: "AUTH_REQUIRED" }, { status: 401 });
+  const cron = isCronRequest(req);
+  const user = cron ? null : await getCurrentUser();
+  if (!cron && !user) return NextResponse.json({ error: "AUTH_REQUIRED" }, { status: 401 });
 
   const body = await req.json().catch(() => ({}));
   const runId = typeof body?.runId === "string" ? body.runId : "";
@@ -33,7 +35,6 @@ export async function POST(req: Request) {
         "id, connection_id, status, gmail_query, gmail_page_token, target_email_count, queued_message_count, ingestion_complete"
       )
       .eq("id", runId)
-      .eq("user_id", user.id)
       .maybeSingle();
 
     if (runError) throw new Error("Could not load run: " + runError.message);
@@ -59,7 +60,6 @@ export async function POST(req: Request) {
       .from("google_connections")
       .select("id, refresh_token")
       .eq("id", run.connection_id)
-      .eq("user_id", user.id)
       .eq("is_active", true)
       .maybeSingle();
 
@@ -119,7 +119,6 @@ export async function POST(req: Request) {
         last_heartbeat_at: new Date().toISOString(),
       })
       .eq("id", run.id)
-      .eq("user_id", user.id)
       .eq("status", "running");
 
     if (checkpointError) {
