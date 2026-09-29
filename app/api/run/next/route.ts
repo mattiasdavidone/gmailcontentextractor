@@ -200,6 +200,15 @@ export async function POST(req: Request) {
     const messageRef = listRes.data.messages?.[0];
 
     if (!messageRef?.id) {
+      await supabase
+        .from("tool_runs")
+        .update({
+          status: "complete",
+          completed_at: new Date().toISOString(),
+        })
+        .eq("id", runId)
+        .eq("user_id", user.id);
+
       return NextResponse.json({
         done: true,
         scanned: 0,
@@ -303,6 +312,7 @@ export async function POST(req: Request) {
         .upsert(
           {
             connection_id: connection.id,
+            run_id: runId,
             message_id: messageRef.id,
             status: "bot_filtered",
           },
