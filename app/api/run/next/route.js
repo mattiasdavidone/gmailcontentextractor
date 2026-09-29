@@ -986,6 +986,45 @@ export async function POST(req) {
       extractedContact
     );
 
+    // The atomic DB upsert can return a canonical contact created by another
+    // worker between our earlier duplicate check and this write. Treat that
+    // case as a duplicate instead of counting it as a new contact.
+    if (savedContact.message_id !== messageId) {
+      if (!savedContact.sheet_written) {
+        const sheets = google.sheets({ version: "v4", auth });
+
+        await writeContactToSheet(
+          supabase,
+          sheets,
+          connection,
+          user,
+          savedContact,
+          fromHeader
+        );
+      }
+
+      await setEmailStatus(
+        supabase,
+        connection.id,
+        messageId,
+        runId,
+        "contact_already_in_sheet"
+      );
+
+      await incrementRun(supabase, runId, user.id, {
+        scanned: 1,
+      });
+
+      return NextResponse.json({
+        done: false,
+        scanned: 1,
+        botsFiltered: 0,
+        contactsExtracted: 0,
+        activity:
+          "Contact already known; skipped duplicate: " + fromHeader,
+      });
+    }
+
     await assertRunActive(supabase, runId, user.id);
 
     stage = "writing contact to Google Sheet";
