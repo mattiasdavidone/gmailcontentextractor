@@ -158,14 +158,25 @@ export async function POST(req: Request) {
       connection.target_sheet_tab_id !== tab.tabId ||
       connection.target_sheet_tab_name !== tab.title
     ) {
-      await supabase
+      let updateQuery = supabase
         .from("google_connections")
         .update({
           target_sheet_tab_id: tab.tabId,
           target_sheet_tab_name: tab.title,
         })
-        .eq("id", connection.id)
-        .eq("user_id", user.id);
+        .eq("id", connection.id);
+
+      if (user) {
+        updateQuery = updateQuery.eq("user_id", user.id);
+      }
+
+      const { error: tabUpdateError } = await updateQuery;
+
+      if (tabUpdateError) {
+        throw new Error(
+          "Could not save the Contacts tab: " + tabUpdateError.message
+        );
+      }
     }
 
     const messageIdsAlreadyInSheet = await readSheetMessageIds(
