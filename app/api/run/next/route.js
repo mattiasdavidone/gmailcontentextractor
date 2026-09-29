@@ -236,7 +236,7 @@ async function listNextCandidateMessage(gmail, supabase, connectionId) {
 
       if (!log) return id;
 
-      if (log.status === "failed") return id;
+      if (log.status === "reset" || log.status === "failed") return id;
 
       if (
         log.status === "processing" &&
