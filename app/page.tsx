@@ -54,34 +54,73 @@ export default function Dashboard() {
   const runIdRef = useRef<string | null>(null);
 
   useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const justConnected = params.get("connected") === "1";
+    const googleError = params.get("google_error") === "1";
+
+    if (justConnected) {
+      setConnected(true);
+      addActivity("Gmail connected.", "success");
+    }
+
+    if (googleError) {
+      setErrorMessage("Google connection could not be completed. Please try again.");
+      addActivity("Google connection could not be completed.", "error");
+    }
+
     if (window.location.search) {
       window.history.replaceState({}, "", window.location.pathname);
     }
 
-    void loadStatus();
+    void loadStatusWithRetry();
   }, []);
+
+  async function loadStatusWithRetry() {
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      const result = await loadStatus();
+
+      if (result) return;
+
+      await new Promise((resolve) => setTimeout(resolve, 350 * (attempt + 1)));
+    }
+  }
 
   async function loadStatus() {
     try {
-      const response = await fetch("/api/status", { cache: "no-store" });
+      const response = await fetch("/api/status", {
+        cache: "no-store",
+        headers: { "Cache-Control": "no-cache" },
+      });
+
+      const data = await response.json().catch(() => null);
 
       if (!response.ok) {
+        const message =
+          data?.error || "Unable to determine the Gmail connection status.";
+
+        setErrorMessage(message);
         setConnected(false);
-        return;
+        return false;
       }
 
-      const data = (await response.json()) as StatusResponse;
-
-      setConnected(data.connected);
-      setEmail(data.email);
+      setConnected(Boolean(data.connected));
+      setEmail(data.email || null);
       setAccountEmail(data.accountEmail || "");
 
       if (data.sheetId) {
         setSheetId(data.sheetId);
         setSheetSaved(true);
       }
-    } catch {
+
+      return true;
+    } catch (error) {
       setConnected(false);
+      setErrorMessage(
+        error instanceof Error
+          ? error.message
+          : "Unable to determine the Gmail connection status."
+      );
+      return false;
     }
   }
 
