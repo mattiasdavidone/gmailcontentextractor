@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - fix/runtime-processing-architecture
+      - fix/final-processing-hardening
   pull_request:
     branches:
       - main
@@ -16,10 +17,10 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
       - run: npm install
       - name: Commit refreshed lockfile
@@ -34,5 +35,25 @@ jobs:
             git commit -m "Update package lockfile"
             git push
           fi
+      - name: Upload refreshed lockfile
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: refreshed-lockfile
+          path: package-lock.json
       - run: npm ci
-      - run: npm run build
+      - name: Build with log capture
+        id: build
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          npm run build 2>&1 | tee build.log
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: build.log
+      - name: Fail if build failed
+        if: steps.build.outcome == 'failure'
+        run: exit 1

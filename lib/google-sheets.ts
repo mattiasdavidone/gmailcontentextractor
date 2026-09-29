@@ -45,7 +45,17 @@ export async function withGoogleRetry<T>(
     try {
       return await operation();
     } catch (error) {
-      if (attempt >= retries || !isGoogleQuotaError(error)) {
+      const status = Number(
+        (error as any)?.code ??
+          (error as any)?.response?.status ??
+          (error as any)?.status ??
+          0
+      );
+
+      // Google API clients already retry quota 429s internally. Retrying a
+      // 429 again here can amplify the quota problem. Handle 429 at the
+      // email/run level instead; only retry transient 503 responses here.
+      if (attempt >= retries || status !== 503) {
         throw error;
       }
 

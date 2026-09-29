@@ -152,6 +152,32 @@ export async function POST(req: NextRequest) {
     );
   }
 
+  const { data: activeRun, error: activeRunError } = await supabase
+    .from("tool_runs")
+    .select("id")
+    .eq("user_id", user.id)
+    .eq("connection_id", connection.id)
+    .eq("status", "running")
+    .limit(1)
+    .maybeSingle();
+
+  if (activeRunError) {
+    return NextResponse.json(
+      { error: activeRunError.message },
+      { status: 500 }
+    );
+  }
+
+  if (activeRun) {
+    return NextResponse.json(
+      {
+        error:
+          "Stop the current Gmail scan before changing the Google Sheet destination.",
+      },
+      { status: 409 }
+    );
+  }
+
   const auth = new google.auth.OAuth2(
     process.env.GOOGLE_CLIENT_ID,
     process.env.GOOGLE_CLIENT_SECRET
@@ -160,6 +186,40 @@ export async function POST(req: NextRequest) {
   auth.setCredentials({ refresh_token: connection.refresh_token });
 
   try {
+    // Saving the same spreadsheet again is a no-op. The run engine already
+    // has the validated Contacts tab stored on the connection, so avoid
+    // another workbook/header/data read and avoid burning Sheets quota.
+    if (
+      connection.target_sheet_id === sheetId &&
+      typeof connection.target_sheet_tab_id === "number" &&
+      connection.target_sheet_tab_name
+    ) {
+      const { data: linked } = await supabase
+        .from("linked_spreadsheets")
+        .select("title, spreadsheet_url")
+        .eq("user_id", user.id)
+        .eq("spreadsheet_id", sheetId)
+        .limit(1)
+        .maybeSingle();
+
+      await supabase
+        .from("linked_spreadsheets")
+        .update({ last_used_at: new Date().toISOString() })
+        .eq("user_id", user.id)
+        .eq("spreadsheet_id", sheetId);
+
+      return NextResponse.json({
+        sheetId,
+        title: linked?.title || "Google Sheet",
+        spreadsheetUrl:
+          linked?.spreadsheet_url ||
+          "https://docs.google.com/spreadsheets/d/" + sheetId + "/edit",
+        tabName: connection.target_sheet_tab_name,
+        importedContacts: 0,
+        reused: true,
+      });
+    }
+
     const sheets = google.sheets({ version: "v4", auth });
 
     const contactsTab = await ensureContactsTab(
@@ -232,6 +292,8 @@ export async function POST(req: NextRequest) {
       spreadsheetUrl: contactsTab.spreadsheetUrl,
       tabName: contactsTab.title,
       importedContacts: imported,
+      reused: false,
+      created: contactsTab.created === true,
     });
   } catch (error) {
     console.error("Google Sheet save failed", {
@@ -258,6 +320,22 @@ export async function POST(req: NextRequest) {
       );
     }
 
+    if (message.includes("429") || lower.includes("quota")) {
+      return NextResponse.json(
+        {
+          error:
+            "Google Sheets is temporarily rate-limiting this operation. Wait a few seconds and try again.",
+          quotaLimited: true,
+          retryable: true,
+          retryAfterSeconds: 5,
+        },
+        {
+          status: 429,
+          headers: { "Retry-After": "5" },
+        }
+      );
+    }
+
     if (
       lower.includes("permission") ||
       lower.includes("forbidden") ||
@@ -271,19 +349,6 @@ export async function POST(req: NextRequest) {
             ", then paste the full Google Sheets link again.",
         },
         { status: 400 }
-      );
-    }
-
-    if (message.includes("429") || lower.includes("quota")) {
-      return NextResponse.json(
-        {
-          error:
-            "Google Sheets is temporarily rate-limiting the link. Wait a few seconds and try Save again.",
-        },
-        {
-          status: 429,
-          headers: { "Retry-After": "5" },
-        }
       );
     }
 

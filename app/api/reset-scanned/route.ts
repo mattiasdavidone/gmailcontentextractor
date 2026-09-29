@@ -2,8 +2,18 @@ import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { getCurrentUser } from "@/lib/auth";
 
-export const maxDuration = 30;
 export const dynamic = "force-dynamic";
+
+function getSupabase() {
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+  if (!url || !serviceRoleKey) {
+    throw new Error("Supabase environment variables are not configured.");
+  }
+
+  return createClient(url, serviceRoleKey);
+}
 
 export async function POST() {
   try {
@@ -13,10 +23,7 @@ export async function POST() {
       return NextResponse.json({ error: "AUTH_REQUIRED" }, { status: 401 });
     }
 
-    const supabase = createClient(
-      process.env.NEXT_PUBLIC_SUPABASE_URL!,
-      process.env.SUPABASE_SERVICE_ROLE_KEY!
-    );
+    const supabase = getSupabase();
 
     const { data: connections, error: connectionError } = await supabase
       .from("google_connections")
@@ -26,30 +33,21 @@ export async function POST() {
 
     if (connectionError) {
       throw new Error(
-        "Supabase connection lookup failed: " + connectionError.message
+        "Could not load Gmail connections: " + connectionError.message
       );
     }
 
-    const connectionIds = (connections || []).map((connection) => connection.id);
+    const connectionIds = (connections || [])
+      .map((connection) => connection.id)
+      .filter(Boolean);
 
     if (connectionIds.length === 0) {
       return NextResponse.json({
         success: true,
         emailsReset: 0,
         contactsPreserved: true,
-        message: "No active Gmail connection found.",
+        message: "There is no active Gmail connection to reset.",
       });
-    }
-
-    const { count, error: logDeleteError } = await supabase
-      .from("email_logs")
-      .delete({ count: "exact" })
-      .in("connection_id", connectionIds);
-
-    if (logDeleteError) {
-      throw new Error(
-        "Could not clear processing history: " + logDeleteError.message
-      );
     }
 
     const { error: runError } = await supabase
@@ -67,14 +65,38 @@ export async function POST() {
       );
     }
 
+    // Preserve processing history for diagnostics and auditing. A reset only
+    // changes completed/failed state back to a retryable marker.
+    const { count, error: resetError } = await supabase
+      .from("email_logs")
+      .update({
+        status: "reset",
+        run_id: null,
+        processed_at: new Date().toISOString(),
+      })
+      .in("connection_id", connectionIds)
+      .in("status", [
+        "bot_filtered",
+        "contact_already_in_sheet",
+        "contact_extracted",
+        "failed",
+        "processing",
+      ]);
+
+    if (resetError) {
+      throw new Error(
+        "Could not reset processing history: " + resetError.message
+      );
+    }
+
     return NextResponse.json({
       success: true,
       emailsReset: count || 0,
       contactsPreserved: true,
       message:
         count && count > 0
-          ? "Processing history was cleared. Existing contacts were preserved, so rerunning will not create duplicate contact rows."
-          : "Processing history was already clear. Existing contacts were preserved.",
+          ? "Processing history was reset. Existing contacts were preserved, so rerunning will not create duplicate contact rows."
+          : "Processing history was already reset. Existing contacts were preserved.",
     });
   } catch (error) {
     console.error("Reset processing history failed", error);

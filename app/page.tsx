@@ -179,9 +179,13 @@ export default function Dashboard() {
       setSheetSaved(true);
       setSheetTabName(data.tabName || null);
       addActivity(
-        data.tabName
-          ? `Spreadsheet saved. New Contacts tab created: ${data.tabName}`
-          : "Spreadsheet destination saved.",
+        data.reused
+          ? `Spreadsheet already linked. Reusing Contacts tab: ${data.tabName}`
+          : data.tabName
+            ? data.importedContacts
+              ? `Spreadsheet saved. Imported ${data.importedContacts} existing contacts into Contacts.`
+              : `Spreadsheet saved. Contacts tab: ${data.tabName}`
+            : "Spreadsheet destination saved.",
         "success"
       );
     } catch (error) {
@@ -245,7 +249,11 @@ export default function Dashboard() {
     }
   }
 
-  async function processNext(signal: AbortSignal, runId: string) {
+  async function processNext(
+    signal: AbortSignal,
+    runId: string,
+    quotaRetries = 0
+  ) {
     if (!runningRef.current || signal.aborted) return;
 
     try {
@@ -273,10 +281,41 @@ export default function Dashboard() {
       }
 
       if (!response.ok) {
-        throw new Error(
+        if (
+          response.status === 429 &&
+          data.retryable &&
+          quotaRetries < 3
+        ) {
+          const retryAfterSeconds = Math.max(
+            1,
+            Math.min(15, Number(data.retryAfterSeconds) || 5)
+          );
+
+          addActivity(
+            `Google is rate-limiting the run. Retrying in ${retryAfterSeconds}s...`,
+            "warning"
+          );
+
+          await new Promise((resolve) =>
+            setTimeout(resolve, retryAfterSeconds * 1000)
+          );
+
+          if (!runningRef.current || signal.aborted) return;
+
+          await processNext(signal, runId, quotaRetries + 1);
+          return;
+        }
+
+        const extractionError = new Error(
           data.error ||
             `The extraction step failed (HTTP ${response.status}).`
         );
+
+        if (response.status === 429 && data.quotaLimited) {
+          (extractionError as Error & { quotaLimited?: boolean }).quotaLimited = true;
+        }
+
+        throw extractionError;
       }
 
       if (!raw.trim()) {
@@ -322,8 +361,29 @@ export default function Dashboard() {
       const message =
         error instanceof Error ? error.message : "The extraction failed.";
 
+      if (
+        error instanceof Error &&
+        (error as Error & { quotaLimited?: boolean }).quotaLimited
+      ) {
+        const runIdToCancel = runIdRef.current;
+
+        if (runIdToCancel) {
+          void fetch("/api/run/cancel", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ runId: runIdToCancel }),
+          });
+        }
+
+        addActivity(
+          "Google Sheets quota did not recover after retries. The run was stopped safely; no email was marked complete.",
+          "error"
+        );
+      } else {
+        addActivity(message, "error");
+      }
+
       setErrorMessage(message);
-      addActivity(message, "error");
     }
   }
 
@@ -378,7 +438,9 @@ export default function Dashboard() {
       }
 
       if (!response.ok) {
-        throw new Error(data.error || `Unable to reset scanned status (HTTP ${response.status}).`);
+        throw new Error(
+          data.error || `Unable to reset processing history (HTTP ${response.status}).`
+        );
       }
 
       runningRef.current = false;
@@ -446,6 +508,16 @@ export default function Dashboard() {
             </a>
             <button
               onClick={async () => {
+                const activeRunId = runIdRef.current;
+
+                if (activeRunId) {
+                  await fetch("/api/run/cancel", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ runId: activeRunId }),
+                  }).catch(() => undefined);
+                }
+
                 await fetch("/api/auth/logout", { method: "POST" });
                 window.location.href = "/login";
               }}
@@ -516,7 +588,8 @@ export default function Dashboard() {
 
               <button
                 onClick={() => connectGmail(connected)}
-                className="rounded-md border border-[var(--border)] bg-white px-3 py-2 text-[12px] font-medium transition hover:bg-[var(--surface-muted)]"
+                disabled={runState === "running"}
+               className="rounded-md border border-[var(--border)] bg-white px-3 py-2 text-[12px] font-medium transition hover:bg-[var(--surface-muted)] disabled:cursor-not-allowed disabled:opacity-50"
               >
                 {connected ? "Reconnect" : "Connect Gmail"}
               </button>
@@ -615,7 +688,7 @@ export default function Dashboard() {
             <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
               <div>
                 <div className="text-[12px] font-medium text-[var(--danger)]">
-                  Clear scanned status
+                  Reset processing history
                 </div>
                 <p className="mt-1 max-w-2xl text-[12px] text-[#8f7070]">
                   This clears processing history so inbox emails can be scanned again. Existing extracted contacts are preserved, so rerunning will not create duplicate contact rows.
@@ -628,7 +701,7 @@ export default function Dashboard() {
                 disabled={runState === "running" || resetting}
                 className="shrink-0 rounded-md border border-[#d9aaaa] bg-[#fff4f4] px-3 py-2 text-[12px] font-medium text-[var(--danger)] transition hover:bg-[#fce9e9] disabled:cursor-not-allowed disabled:opacity-45"
               >
-                Clear scanned status
+                Reset processing history
               </button>
             </div>
 
@@ -648,7 +721,7 @@ export default function Dashboard() {
                     disabled={resetting}
                     className="rounded-md border border-[var(--danger)] bg-[var(--danger)] px-3 py-2 text-[12px] font-medium text-white transition hover:opacity-90 disabled:opacity-50"
                   >
-                    {resetting ? "Clearing..." : "Yes, clear scanned status"}
+                    {resetting ? "Resetting..." : "Yes, reset processing history"}
                   </button>
 
                   <button

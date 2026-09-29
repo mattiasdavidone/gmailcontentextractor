@@ -58,18 +58,23 @@ function errorMessage(error) {
   }
 }
 
-function isGoogleQuotaError(error) {
-  const code = Number(
-    error?.code ?? error?.response?.status ?? error?.status ?? 0
+function getGoogleStatus(error) {
+  return Number(
+    error?.code ??
+      error?.response?.status ??
+      error?.status ??
+      error?.response?.data?.error?.code ??
+      0
   );
-  return code === 429 || code === 503;
+}
+
+function isGoogleQuotaError(error) {
+  const status = getGoogleStatus(error);
+  return status === 429 || status === 503;
 }
 
 function isGoogleAuthError(error) {
-  const status = Number(
-    error?.code ?? error?.response?.status ?? error?.status ?? 0
-  );
-
+  const status = getGoogleStatus(error);
   const message = errorMessage(error).toLowerCase();
 
   return (
@@ -77,7 +82,21 @@ function isGoogleAuthError(error) {
     message.includes("invalid_grant") ||
     message.includes("invalid grant") ||
     message.includes("token has been expired") ||
-    message.includes("token has been revoked")
+    message.includes("token has been revoked") ||
+    message.includes("insufficient permission")
+  );
+}
+
+function isMissingSheetError(error) {
+  const status = getGoogleStatus(error);
+  const message = errorMessage(error).toLowerCase();
+
+  return (
+    status === 404 ||
+    (status === 400 &&
+      (message.includes("unable to parse range") ||
+        message.includes("range not found") ||
+        message.includes("not found")))
   );
 }
 
@@ -119,7 +138,8 @@ async function incrementRun(supabase, runId, userId, delta) {
 
   if (error || data !== true) {
     throw new Error(
-      "Could not update run totals: " + (error?.message || "run was not found.")
+      "Could not update run totals: " +
+        (error?.message || "run was not found.")
     );
   }
 }
@@ -166,6 +186,423 @@ async function claimEmail(supabase, connectionId, messageId, runId) {
     claimed: result?.claimed === true,
     status: result?.current_status || null,
   };
+}
+
+async function listNextCandidateMessage(gmail, supabase, connectionId) {
+  let pageToken;
+
+  for (let page = 0; page < 10; page += 1) {
+    const response = await gmail.users.messages.list({
+      userId: "me",
+      q: "in:inbox",
+      maxResults: 100,
+      pageToken,
+    });
+
+    const ids = (response.data.messages || [])
+      .map((message) => message.id)
+      .filter(Boolean);
+
+    if (ids.length === 0) return null;
+
+    const { data: logs, error } = await supabase
+      .from("email_logs")
+      .select("message_id, status, processed_at")
+      .eq("connection_id", connectionId)
+      .in("message_id", ids);
+
+    if (error) {
+      throw new Error(
+        "Could not load email processing history: " + error.message
+      );
+    }
+
+    const logMap = new Map(
+      (logs || []).map((log) => [
+        log.message_id,
+        {
+          status: log.status,
+          processedAt: log.processed_at
+            ? new Date(log.processed_at).getTime()
+            : 0,
+        },
+      ])
+    );
+
+    const now = Date.now();
+
+    for (const id of ids) {
+      const log = logMap.get(id);
+
+      if (!log) return id;
+
+      if (log.status === "reset" || log.status === "failed") return id;
+
+      if (
+        log.status === "processing" &&
+        log.processedAt > 0 &&
+        now - log.processedAt > 10 * 60 * 1000
+      ) {
+        return id;
+      }
+    }
+
+    pageToken = response.data.nextPageToken || undefined;
+
+    if (!pageToken) return null;
+  }
+
+  return null;
+}
+
+async function loadMessage(gmail, messageId) {
+  return gmail.users.messages.get({
+    userId: "me",
+    id: messageId,
+    format: "metadata",
+    metadataHeaders: ["From", "Subject"],
+  });
+}
+
+async function findContactForMessage(supabase, connectionId, messageId) {
+  const { data, error } = await supabase
+    .from("extracted_contacts")
+    .select(
+      "id, email, first_name, last_name, phone, title, address, normalized_email, sheet_written, sheet_written_to, message_id"
+    )
+    .eq("connection_id", connectionId)
+    .eq("message_id", messageId)
+    .limit(1)
+    .maybeSingle();
+
+  if (error) {
+    throw new Error(
+      "Could not load the existing extracted contact: " + error.message
+    );
+  }
+
+  return data || null;
+}
+
+async function findExistingContactByEmail(supabase, connectionId, email) {
+  const normalized = normalizeEmail(email);
+
+  if (!normalized) return null;
+
+  const { data, error } = await supabase
+    .from("extracted_contacts")
+    .select(
+      "id, email, first_name, last_name, phone, title, address, normalized_email, sheet_written, sheet_written_to, message_id"
+    )
+    .eq("connection_id", connectionId)
+    .eq("normalized_email", normalized)
+    .limit(1)
+    .maybeSingle();
+
+  if (error) {
+    throw new Error(
+      "Could not check existing contacts: " + error.message
+    );
+  }
+
+  return data || null;
+}
+
+async function saveExtractedContact(
+  supabase,
+  connectionId,
+  runId,
+  messageId,
+  contact
+) {
+  const email = normalizeEmail(contact.email || "");
+
+  const { data, error } = await supabase.rpc("upsert_extracted_contact", {
+    p_connection_id: connectionId,
+    p_message_id: messageId,
+    p_run_id: runId,
+    p_email: email,
+    p_normalized_email: email || null,
+    p_first_name: contact.first_name || null,
+    p_last_name: contact.last_name || null,
+    p_phone: contact.phone || null,
+    p_title: contact.title || null,
+    p_address: contact.address || null,
+  });
+
+  const row = Array.isArray(data) ? data[0] : data;
+
+  if (error || !row) {
+    throw new Error(
+      "Could not save extracted contact: " +
+        (error?.message || "No contact row returned.")
+    );
+  }
+
+  return row;
+}
+
+function isPendingSheetWrite(contact) {
+  return (
+    !contact.sheet_written &&
+    typeof contact.sheet_written_to === "string" &&
+    contact.sheet_written_to.startsWith("pending:")
+  );
+}
+
+function sheetLocation(sheetId, tabId) {
+  return sheetId + ":" + String(tabId);
+}
+
+function pendingSheetLocation(sheetId, tabId) {
+  return "pending:" + sheetLocation(sheetId, tabId);
+}
+
+async function saveConnectionTab(
+  supabase,
+  connectionId,
+  userId,
+  tab
+) {
+  const { error } = await supabase
+    .from("google_connections")
+    .update({
+      target_sheet_tab_id: tab.tabId,
+      target_sheet_tab_name: tab.title,
+    })
+    .eq("id", connectionId)
+    .eq("user_id", userId);
+
+  if (error) {
+    throw new Error("Could not save the Contacts tab: " + error.message);
+  }
+}
+
+async function resolveContactsTab(
+  supabase,
+  sheets,
+  connection,
+  userId
+) {
+  if (
+    typeof connection.target_sheet_tab_id === "number" &&
+    typeof connection.target_sheet_tab_name === "string" &&
+    connection.target_sheet_tab_name.trim()
+  ) {
+    return {
+      tabId: connection.target_sheet_tab_id,
+      title: connection.target_sheet_tab_name,
+      created: false,
+    };
+  }
+
+  const tab = await ensureContactsTab(
+    sheets,
+    connection.target_sheet_id,
+    connection.target_sheet_tab_id,
+    connection.target_sheet_tab_name
+  );
+
+  await saveConnectionTab(supabase, connection.id, userId, tab);
+
+  return tab;
+}
+
+async function markContactWritten(
+  supabase,
+  contactId,
+  connectionId,
+  target
+) {
+  const { error } = await supabase
+    .from("extracted_contacts")
+    .update({
+      sheet_written: true,
+      sheet_written_to: sheetLocation(
+        target.spreadsheetId,
+        target.tabId
+      ),
+    })
+    .eq("id", contactId)
+    .eq("connection_id", connectionId);
+
+  if (error) {
+    throw new Error(
+      "Could not mark contact as written: " + error.message
+    );
+  }
+}
+
+async function writeContactToSheet(
+  supabase,
+  sheets,
+  connection,
+  user,
+  contact,
+  source
+) {
+  if (contact.sheet_written) return;
+
+  const needsRecoveryCheck = isPendingSheetWrite(contact);
+  let contactsTab;
+
+  if (needsRecoveryCheck) {
+    contactsTab = await resolveContactsTab(
+      supabase,
+      sheets,
+      connection,
+      user.id
+    );
+
+    let alreadyWritten = false;
+
+    try {
+      alreadyWritten = await hasMessageIdInSheet(
+        sheets,
+        connection.target_sheet_id,
+        contactsTab.title,
+        contact.message_id
+      );
+    } catch (error) {
+      if (!isMissingSheetError(error)) {
+        throw error;
+      }
+
+      contactsTab = await ensureContactsTab(
+        sheets,
+        connection.target_sheet_id,
+        connection.target_sheet_tab_id,
+        connection.target_sheet_tab_name
+      );
+
+      await saveConnectionTab(
+        supabase,
+        connection.id,
+        user.id,
+        contactsTab
+      );
+    }
+
+    if (alreadyWritten) {
+      await markContactWritten(
+        supabase,
+        contact.id,
+        connection.id,
+        {
+          spreadsheetId: connection.target_sheet_id,
+          tabId: contactsTab.tabId,
+        }
+      );
+
+      return;
+    }
+  } else if (
+    typeof connection.target_sheet_tab_id === "number" &&
+    typeof connection.target_sheet_tab_name === "string" &&
+    connection.target_sheet_tab_name.trim()
+  ) {
+    contactsTab = {
+      tabId: connection.target_sheet_tab_id,
+      title: connection.target_sheet_tab_name,
+    };
+  } else {
+    contactsTab = await resolveContactsTab(
+      supabase,
+      sheets,
+      connection,
+      user.id
+    );
+  }
+
+  const pendingLocation = pendingSheetLocation(
+    connection.target_sheet_id,
+    contactsTab.tabId
+  );
+
+  const { error: pendingError } = await supabase
+    .from("extracted_contacts")
+    .update({
+      sheet_written: false,
+      sheet_written_to: pendingLocation,
+    })
+    .eq("id", contact.id)
+    .eq("connection_id", connection.id);
+
+  if (pendingError) {
+    throw new Error(
+      "Could not reserve the contact for spreadsheet writing: " +
+        pendingError.message
+    );
+  }
+
+  const appendPayload = {
+    first_name: contact.first_name,
+    last_name: contact.last_name,
+    email: contact.email,
+    phone: contact.phone,
+    title: contact.title,
+    address: contact.address,
+    source,
+    message_id: contact.message_id,
+  };
+
+  try {
+    await appendContact(
+      sheets,
+      connection.target_sheet_id,
+      contactsTab.title,
+      appendPayload
+    );
+  } catch (error) {
+    if (!isMissingSheetError(error)) {
+      throw error;
+    }
+
+    const repairedTab = await ensureContactsTab(
+      sheets,
+      connection.target_sheet_id,
+      connection.target_sheet_tab_id,
+      connection.target_sheet_tab_name
+    );
+
+    await saveConnectionTab(
+      supabase,
+      connection.id,
+      user.id,
+      repairedTab
+    );
+
+    await supabase
+      .from("extracted_contacts")
+      .update({
+        sheet_written: false,
+        sheet_written_to: pendingSheetLocation(
+          connection.target_sheet_id,
+          repairedTab.tabId
+        ),
+      })
+      .eq("id", contact.id)
+      .eq("connection_id", connection.id);
+
+    await appendContact(
+      sheets,
+      connection.target_sheet_id,
+      repairedTab.title,
+      appendPayload
+    );
+
+    contactsTab = repairedTab;
+  }
+
+  await markContactWritten(
+    supabase,
+    contact.id,
+    connection.id,
+    {
+      spreadsheetId: connection.target_sheet_id,
+      tabId: contactsTab.tabId,
+    }
+  );
 }
 
 async function classifySender(sender) {
@@ -215,250 +652,6 @@ async function extractContact(sender, subject, snippet) {
   });
 
   return parseJson(response.choices[0]?.message?.content);
-}
-
-async function listNextCandidateMessage(gmail, supabase, connectionId) {
-  let pageToken;
-
-  for (let page = 0; page < 10; page += 1) {
-    const response = await gmail.users.messages.list({
-      userId: "me",
-      q: "in:inbox",
-      maxResults: 100,
-      pageToken,
-    });
-
-    const ids = (response.data.messages || [])
-      .map((message) => message.id)
-      .filter(Boolean);
-
-    if (ids.length === 0) {
-      return null;
-    }
-
-    const { data: logs, error } = await supabase
-      .from("email_logs")
-      .select("message_id, status, processed_at")
-      .eq("connection_id", connectionId)
-      .in("message_id", ids);
-
-    if (error) {
-      throw new Error("Could not load email processing history: " + error.message);
-    }
-
-    const logMap = new Map(
-      (logs || []).map((log) => [
-        log.message_id,
-        {
-          status: log.status,
-          processedAt: log.processed_at
-            ? new Date(log.processed_at).getTime()
-            : 0,
-        },
-      ])
-    );
-
-    const now = Date.now();
-
-    for (const id of ids) {
-      const log = logMap.get(id);
-
-      if (!log) {
-        return id;
-      }
-
-      if (log.status === "failed") {
-        return id;
-      }
-
-      if (
-        log.status === "processing" &&
-        log.processedAt > 0 &&
-        now - log.processedAt > 10 * 60 * 1000
-      ) {
-        return id;
-      }
-    }
-
-    pageToken = response.data.nextPageToken || undefined;
-
-    if (!pageToken) {
-      return null;
-    }
-  }
-
-  return null;
-}
-
-async function loadMessage(gmail, messageId) {
-  return gmail.users.messages.get({
-    userId: "me",
-    id: messageId,
-    format: "metadata",
-    metadataHeaders: ["From", "Subject"],
-  });
-}
-
-async function findExistingContactByEmail(
-  supabase,
-  connectionId,
-  email
-) {
-  const normalized = normalizeEmail(email);
-
-  if (!normalized) return null;
-
-  const { data, error } = await supabase
-    .from("extracted_contacts")
-    .select(
-      "id, email, first_name, last_name, phone, title, address, normalized_email, sheet_written, sheet_written_to, message_id"
-    )
-    .eq("connection_id", connectionId)
-    .eq("normalized_email", normalized)
-    .limit(1)
-    .maybeSingle();
-
-  if (error) {
-    throw new Error(
-      "Could not check existing contacts: " + error.message
-    );
-  }
-
-  return data || null;
-}
-
-async function findContactForMessage(
-  supabase,
-  connectionId,
-  messageId
-) {
-  const { data, error } = await supabase
-    .from("extracted_contacts")
-    .select(
-      "id, email, first_name, last_name, phone, title, address, normalized_email, sheet_written, sheet_written_to, message_id"
-    )
-    .eq("connection_id", connectionId)
-    .eq("message_id", messageId)
-    .limit(1)
-    .maybeSingle();
-
-  if (error) {
-    throw new Error(
-      "Could not load the existing extracted contact: " + error.message
-    );
-  }
-
-  return data || null;
-}
-
-async function saveExtractedContact(
-  supabase,
-  connectionId,
-  runId,
-  messageId,
-  contact
-) {
-  const email = normalizeEmail(contact.email || "");
-
-  const payload = {
-    connection_id: connectionId,
-    message_id: messageId,
-    run_id: runId,
-    email,
-    normalized_email: email || null,
-    first_name: contact.first_name || null,
-    last_name: contact.last_name || null,
-    phone: contact.phone || null,
-    title: contact.title || null,
-    address: contact.address || null,
-    sheet_written: false,
-    sheet_written_to: null,
-  };
-
-  const { data, error } = await supabase
-    .from("extracted_contacts")
-    .upsert(payload, {
-      onConflict: "connection_id,message_id",
-    })
-    .select(
-      "id, email, first_name, last_name, phone, title, address, normalized_email, sheet_written, sheet_written_to, message_id"
-    )
-    .single();
-
-  if (error || !data) {
-    throw new Error(
-      "Could not save extracted contact: " +
-        (error?.message || "No contact row returned.")
-    );
-  }
-
-  return data;
-}
-
-async function ensureContactWrittenToSheet(
-  supabase,
-  sheets,
-  connection,
-  contact
-) {
-  if (contact.sheet_written) {
-    return connection.target_sheet_tab_id || null;
-  }
-
-  if (!contact.message_id) {
-    throw new Error("Cannot safely recover a contact without its message ID.");
-  }
-
-  const contactsTab = await ensureContactsTab(
-    sheets,
-    connection.target_sheet_id,
-    connection.target_sheet_tab_id,
-    connection.target_sheet_tab_name
-  );
-
-  const alreadyWritten = await hasMessageIdInSheet(
-    sheets,
-    connection.target_sheet_id,
-    contactsTab.title,
-    contact.message_id
-  );
-
-  if (!alreadyWritten) {
-    await appendContact(
-      sheets,
-      connection.target_sheet_id,
-      contactsTab.title,
-      {
-        first_name: contact.first_name,
-        last_name: contact.last_name,
-        email: contact.email,
-        phone: contact.phone,
-        title: contact.title,
-        address: contact.address,
-        source: contact.email || "",
-        message_id: contact.message_id,
-      }
-    );
-  }
-
-  const { error } = await supabase
-    .from("extracted_contacts")
-    .update({
-      sheet_written: true,
-      sheet_written_to:
-        connection.target_sheet_id + ":" + String(contactsTab.tabId),
-    })
-    .eq("id", contact.id)
-    .eq("connection_id", connection.id);
-
-  if (error) {
-    throw new Error(
-      "The contact was written, but its deduplication state could not be saved: " +
-        error.message
-    );
-  }
-
-  return contactsTab.tabId;
 }
 
 export async function POST(req) {
@@ -548,22 +741,17 @@ export async function POST(req) {
 
     stage = "authorizing Google";
 
-    const auth = new google.auth.OAuth2(
-      process.env.GOOGLE_CLIENT_ID,
-      process.env.GOOGLE_CLIENT_SECRET
-    );
+    const clientId = process.env.GOOGLE_CLIENT_ID;
+    const clientSecret = process.env.GOOGLE_CLIENT_SECRET;
 
+    if (!clientId || !clientSecret) {
+      throw new Error("Google OAuth environment variables are not configured.");
+    }
+
+    const auth = new google.auth.OAuth2(clientId, clientSecret);
     auth.setCredentials({ refresh_token: connection.refresh_token });
 
-    const gmail = google.gmail({
-      version: "v1",
-      auth,
-    });
-
-    const sheets = google.sheets({
-      version: "v4",
-      auth,
-    });
+    const gmail = google.gmail({ version: "v1", auth });
 
     stage = "finding next Gmail message";
 
@@ -608,7 +796,10 @@ export async function POST(req) {
         scanned: 0,
         botsFiltered: 0,
         contactsExtracted: 0,
-        activity: "Email is already being processed.",
+        activity:
+          claim.status === "processing"
+            ? "Email is already being processed."
+            : "Email was already completed.",
       });
     }
 
@@ -643,44 +834,19 @@ export async function POST(req) {
       messageId
     );
 
-    if (messageContact?.sheet_written) {
-      await setEmailStatus(
-        supabase,
-        connection.id,
-        messageId,
-        runId,
-        "contact_extracted"
-      );
+    if (messageContact) {
+      if (!messageContact.sheet_written) {
+        stage = "recovering saved contact";
 
-      await incrementRun(supabase, runId, user.id, { scanned: 1, contacts: 1 });
+        const sheets = google.sheets({ version: "v4", auth });
 
-      return NextResponse.json({
-        done: false,
-        scanned: 1,
-        botsFiltered: 0,
-        contactsExtracted: 1,
-        activity: "Already written to the spreadsheet: " + fromHeader,
-      });
-    }
-
-    const senderEmail = extractEmailAddress(fromHeader);
-
-    stage = "checking known contacts";
-
-    const knownSenderContact = await findExistingContactByEmail(
-      supabase,
-      connection.id,
-      senderEmail
-    );
-
-    if (knownSenderContact) {
-      if (!knownSenderContact.sheet_written) {
-        stage = "recovering known contact";
-        await ensureContactWrittenToSheet(
+        await writeContactToSheet(
           supabase,
           sheets,
           connection,
-          knownSenderContact
+          user,
+          messageContact,
+          fromHeader
         );
       }
 
@@ -689,18 +855,20 @@ export async function POST(req) {
         connection.id,
         messageId,
         runId,
-        "contact_already_in_sheet"
+        "contact_extracted"
       );
 
-      await incrementRun(supabase, runId, user.id, { scanned: 1 });
+      await incrementRun(supabase, runId, user.id, {
+        scanned: 1,
+        contacts: 1,
+      });
 
       return NextResponse.json({
         done: false,
         scanned: 1,
         botsFiltered: 0,
-        contactsExtracted: 0,
-        activity:
-          "Contact already known; skipped duplicate: " + fromHeader,
+        contactsExtracted: 1,
+        activity: "Recovered contact: " + fromHeader,
       });
     }
 
@@ -743,8 +911,15 @@ export async function POST(req) {
       snippet
     );
 
+    const senderEmail = extractEmailAddress(fromHeader);
     const extractedEmail =
       normalizeEmail(extracted.email) || senderEmail;
+
+    if (!extractedEmail) {
+      throw new Error(
+        "The contact extractor did not return a usable email address."
+      );
+    }
 
     const extractedContact = {
       email: extractedEmail,
@@ -755,22 +930,27 @@ export async function POST(req) {
       address: extracted.address || null,
     };
 
-    stage = "checking extracted contact";
+    stage = "checking known contacts";
 
-    const knownExtractedContact = await findExistingContactByEmail(
+    const knownContact = await findExistingContactByEmail(
       supabase,
       connection.id,
       extractedEmail
     );
 
-    if (knownExtractedContact) {
-      if (!knownExtractedContact.sheet_written) {
-        stage = "recovering extracted contact";
-        await ensureContactWrittenToSheet(
+    if (knownContact) {
+      stage = "recovering known contact";
+
+      if (!knownContact.sheet_written) {
+        const sheets = google.sheets({ version: "v4", auth });
+
+        await writeContactToSheet(
           supabase,
           sheets,
           connection,
-          knownExtractedContact
+          user,
+          knownContact,
+          fromHeader
         );
       }
 
@@ -782,7 +962,9 @@ export async function POST(req) {
         "contact_already_in_sheet"
       );
 
-      await incrementRun(supabase, runId, user.id, { scanned: 1 });
+      await incrementRun(supabase, runId, user.id, {
+        scanned: 1,
+      });
 
       return NextResponse.json({
         done: false,
@@ -804,83 +986,59 @@ export async function POST(req) {
       extractedContact
     );
 
+    // The atomic DB upsert can return a canonical contact created by another
+    // worker between our earlier duplicate check and this write. Treat that
+    // case as a duplicate instead of counting it as a new contact.
+    if (savedContact.message_id !== messageId) {
+      if (!savedContact.sheet_written) {
+        const sheets = google.sheets({ version: "v4", auth });
+
+        await writeContactToSheet(
+          supabase,
+          sheets,
+          connection,
+          user,
+          savedContact,
+          fromHeader
+        );
+      }
+
+      await setEmailStatus(
+        supabase,
+        connection.id,
+        messageId,
+        runId,
+        "contact_already_in_sheet"
+      );
+
+      await incrementRun(supabase, runId, user.id, {
+        scanned: 1,
+      });
+
+      return NextResponse.json({
+        done: false,
+        scanned: 1,
+        botsFiltered: 0,
+        contactsExtracted: 0,
+        activity:
+          "Contact already known; skipped duplicate: " + fromHeader,
+      });
+    }
+
     await assertRunActive(supabase, runId, user.id);
 
     stage = "writing contact to Google Sheet";
 
-    const contactsTab = await ensureContactsTab(
+    const sheets = google.sheets({ version: "v4", auth });
+
+    await writeContactToSheet(
+      supabase,
       sheets,
-      connection.target_sheet_id,
-      connection.target_sheet_tab_id,
-      connection.target_sheet_tab_name
+      connection,
+      user,
+      savedContact,
+      fromHeader
     );
-
-    if (
-      connection.target_sheet_tab_id !== contactsTab.tabId ||
-      connection.target_sheet_tab_name !== contactsTab.title
-    ) {
-      const { error: tabError } = await supabase
-        .from("google_connections")
-        .update({
-          target_sheet_tab_id: contactsTab.tabId,
-          target_sheet_tab_name: contactsTab.title,
-        })
-        .eq("id", connection.id)
-        .eq("user_id", user.id);
-
-      if (tabError) {
-        throw new Error(
-          "Could not save the Contacts tab: " + tabError.message
-        );
-      }
-    }
-
-    if (!savedContact.sheet_written) {
-      const alreadyWritten = await hasMessageIdInSheet(
-        sheets,
-        connection.target_sheet_id,
-        contactsTab.title,
-        messageId
-      );
-
-      if (!alreadyWritten) {
-        await appendContact(
-          sheets,
-          connection.target_sheet_id,
-          contactsTab.title,
-          {
-            first_name: savedContact.first_name,
-            last_name: savedContact.last_name,
-            email: savedContact.email,
-            phone: savedContact.phone,
-            title: savedContact.title,
-            address: savedContact.address,
-            source: fromHeader,
-            message_id: messageId,
-          }
-        );
-      }
-    }
-
-    await assertRunActive(supabase, runId, user.id);
-
-    stage = "marking contact written";
-
-    const { error: markError } = await supabase
-      .from("extracted_contacts")
-      .update({
-        sheet_written: true,
-        sheet_written_to:
-          connection.target_sheet_id + ":" + String(contactsTab.tabId),
-      })
-      .eq("id", savedContact.id)
-      .eq("connection_id", connection.id);
-
-    if (markError) {
-      throw new Error(
-        "Could not mark contact as written: " + markError.message
-      );
-    }
 
     await setEmailStatus(
       supabase,
@@ -925,14 +1083,32 @@ export async function POST(req) {
     const message = errorMessage(error);
 
     if (connectionId && messageId && runId) {
-      await supabase
-        .rpc("set_email_processing_status", {
-          p_connection_id: connectionId,
-          p_message_id: messageId,
-          p_run_id: runId,
-          p_status: "failed",
-        })
-        .catch(() => undefined);
+      await setEmailStatus(
+        supabase,
+        connectionId,
+        messageId,
+        runId,
+        "failed"
+      ).catch(() => undefined);
+    }
+
+    if (isGoogleQuotaError(error)) {
+      return NextResponse.json(
+        {
+          error:
+            "Google is temporarily rate-limiting this request. Retrying the same email shortly.",
+          quotaLimited: true,
+          retryable: true,
+          retryAfterSeconds: 5,
+          stage,
+        },
+        {
+          status: 429,
+          headers: {
+            "Retry-After": "5",
+          },
+        }
+      );
     }
 
     if (runId) {
@@ -952,27 +1128,10 @@ export async function POST(req) {
       return NextResponse.json(
         {
           error:
-            "Your Google authorization has expired or been revoked. Reconnect Gmail and approve access again.",
+            "Your Google authorization has expired or is missing the required Gmail read permission. Reconnect Gmail and approve access again.",
           authRequired: true,
         },
         { status: 401 }
-      );
-    }
-
-    if (isGoogleQuotaError(error)) {
-      return NextResponse.json(
-        {
-          error:
-            "Google is temporarily rate-limiting this request. The email was not marked complete; retry in a few seconds.",
-          quotaLimited: true,
-          stage,
-        },
-        {
-          status: 429,
-          headers: {
-            "Retry-After": "5",
-          },
-        }
       );
     }
 

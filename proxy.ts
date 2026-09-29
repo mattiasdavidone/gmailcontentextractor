@@ -2,15 +2,14 @@ import { NextRequest, NextResponse } from "next/server";
 
 const SESSION_COOKIE = "gce_session";
 
-export function middleware(request: NextRequest) {
+export function proxy(request: NextRequest) {
   const pathname = request.nextUrl.pathname;
   const token = request.cookies.get(SESSION_COOKIE)?.value;
 
   const publicPath =
     pathname === "/login" ||
     pathname === "/signup" ||
-    pathname.startsWith("/api/auth/") ||
-    pathname.startsWith("/api/cron/");
+    pathname.startsWith("/api/auth/");
 
   if (!token && !publicPath) {
     if (pathname.startsWith("/api/")) {
