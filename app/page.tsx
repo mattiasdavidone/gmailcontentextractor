@@ -589,7 +589,6 @@ export default function Dashboard() {
               <button
                 onClick={() => connectGmail(connected)}
                 disabled={runState === "running"}
-                disabled={runState === "running"}
                className="rounded-md border border-[var(--border)] bg-white px-3 py-2 text-[12px] font-medium transition hover:bg-[var(--surface-muted)] disabled:cursor-not-allowed disabled:opacity-50"
               >
                 {connected ? "Reconnect" : "Connect Gmail"}
