@@ -11,22 +11,17 @@ export async function GET(req: Request) {
     return NextResponse.json({ error: "AUTH_REQUIRED" }, { status: 401 });
   }
 
-  const url = new URL(req.url);
-  const runId = url.searchParams.get("runId");
-
-  if (!runId) {
-    return NextResponse.json({ error: "runId is required." }, { status: 400 });
-  }
 
   const supabase = createRunDb();
 
   const { data: run, error } = await supabase
     .from("tool_runs")
     .select(
-      "id, status, started_at, completed_at, target_email_count, discovered_message_count, queued_message_count, completed_message_count, failed_message_count, sheet_queued_count, sheet_completed_count, sheet_failed_count, ingestion_complete, last_heartbeat_at, worker_id, worker_lease_expires_at, sheet_worker_id, sheet_worker_lease_expires_at"
+      "id, status, started_at, completed_at, target_email_count, discovered_message_count, queued_message_count, completed_message_count, failed_message_count, emails_scanned, bots_filtered, contacts_extracted, sheet_queued_count, sheet_completed_count, sheet_failed_count, ingestion_complete, last_heartbeat_at, worker_id, worker_lease_expires_at, sheet_worker_id, sheet_worker_lease_expires_at"
     )
-    .eq("id", runId)
     .eq("user_id", user.id)
+    .order("started_at", { ascending: false })
+    .limit(1)
     .maybeSingle();
 
   if (error) {
@@ -39,6 +34,11 @@ export async function GET(req: Request) {
 
   return NextResponse.json({
     run,
+    stats: {
+      totalScanned: Number(run.emails_scanned || 0),
+      botsFiltered: Number(run.bots_filtered || 0),
+      contactsExtracted: Number(run.contacts_extracted || 0),
+    },
     progress: {
       target: Number(run.target_email_count || 0),
       queued: Number(run.queued_message_count || 0),
