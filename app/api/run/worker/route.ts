@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { getCurrentUser } from "@/lib/auth";
+import { isCronRequest } from "@/lib/cron-auth";
 import { createGmailClient, getGmailMessagesInBatches } from "@/lib/google-gmail";
 import {
   analyzeEmailForContact,
@@ -71,9 +72,10 @@ async function enqueueSheetJob(
 }
 
 export async function POST(req: Request) {
-  const user = await getCurrentUser();
+  const cron = isCronRequest(req);
+  const user = cron ? null : await getCurrentUser();
 
-  if (!user) {
+  if (!cron && !user) {
     return NextResponse.json({ error: "AUTH_REQUIRED" }, { status: 401 });
   }
 
@@ -98,7 +100,6 @@ export async function POST(req: Request) {
         "id, user_id, connection_id, status, target_email_count, ingestion_complete"
       )
       .eq("id", runId)
-      .eq("user_id", user.id)
       .maybeSingle();
 
     if (runError) {
@@ -144,7 +145,6 @@ export async function POST(req: Request) {
       .from("google_connections")
       .select("id, refresh_token, is_active")
       .eq("id", run.connection_id)
-      .eq("user_id", user.id)
       .eq("is_active", true)
       .maybeSingle();
 
@@ -388,7 +388,7 @@ export async function POST(req: Request) {
       }
     }
 
-    await incrementStats(supabase, runId, user.id, {
+    await incrementStats(supabase, runId, run.user_id, {
       scanned: processed,
       filtered,
       contacts,
