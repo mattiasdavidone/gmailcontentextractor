@@ -57,6 +57,13 @@ export async function GET(req: NextRequest) {
       process.env.SUPABASE_SERVICE_ROLE_KEY!
     );
 
+    // Claim a legacy connection created before account support existed.
+    await supabase
+      .from("google_connections")
+      .update({ user_id: user.id })
+      .eq("google_email", googleEmail)
+      .is("user_id", null);
+
     const { error } = await supabase
       .from("google_connections")
       .upsert(
