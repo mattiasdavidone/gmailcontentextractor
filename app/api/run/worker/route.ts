@@ -35,12 +35,11 @@ function messageOf(error: unknown) {
 async function incrementStats(
   supabase: ReturnType<typeof createRunDb>,
   runId: string,
-  userId: string,
+  _userId: string,
   delta: { scanned?: number; filtered?: number; contacts?: number }
 ) {
-  const { error } = await supabase.rpc("increment_tool_run_stats", {
+  const { error } = await supabase.rpc("record_run_processing_stats", {
     p_run_id: runId,
-    p_user_id: userId,
     p_scanned: delta.scanned || 0,
     p_filtered: delta.filtered || 0,
     p_contacts: delta.contacts || 0,
