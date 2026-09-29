@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - fix/runtime-processing-architecture
+      - fix/final-processing-hardening
   pull_request:
     branches:
       - main
