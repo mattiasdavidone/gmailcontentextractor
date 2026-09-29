@@ -28,15 +28,13 @@ export async function GET(req: NextRequest) {
   const returnedState = req.nextUrl.searchParams.get("state");
   const cookieStore = await cookies();
   const expectedState = cookieStore.get("gce_google_oauth_state")?.value || "";
-  const hasValidStateShape =
-    typeof returnedState === "string" &&
-    returnedState.length > 0 &&
-    returnedState.length === expectedState.length;
+  const state = typeof returnedState === "string" ? returnedState : "";
 
   const validState =
-    hasValidStateShape &&
+    state.length > 0 &&
+    state.length === expectedState.length &&
     timingSafeEqual(
-      Buffer.from(returnedState),
+      Buffer.from(state),
       Buffer.from(expectedState)
     );
 
