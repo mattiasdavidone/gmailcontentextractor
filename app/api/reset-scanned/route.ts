@@ -117,6 +117,28 @@ export async function POST() {
       );
     }
 
+    const { error: contactDeleteError } = await supabase
+      .from("extracted_contacts")
+      .delete()
+      .eq("connection_id", connection.id);
+
+    if (contactDeleteError) {
+      throw new Error(
+        `Could not clear extracted contact state: ${contactDeleteError.message}`
+      );
+    }
+
+    // Keep tool_runs so account usage/history remains intact. "Clear scanned
+    // status" resets processing state, not billing/usage history.
+    await supabase
+      .from("tool_runs")
+      .update({
+        status: "cancelled",
+        completed_at: new Date().toISOString(),
+      })
+      .eq("connection_id", connection.id)
+      .eq("status", "running");
+
     return NextResponse.json({
       success: true,
       emailsReset: scannedMessageIds.length,
