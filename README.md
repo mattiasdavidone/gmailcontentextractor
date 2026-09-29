@@ -41,7 +41,7 @@ The new processing subsystem:
 9. Writes Sheets rows in bounded batches with durable retry state.
 10. Marks the run complete only when ingestion is closed and all retryable email and Sheets jobs are resolved.
 
-The processing subsystem never modifies Gmail messages or labels. The legacy one-email `/api/run/next` endpoint has been retired.
+The processing subsystem never modifies Gmail messages or labels. The legacy one-email `/api/run/next` endpoint and its old email-processing RPCs have been retired. Historical `email_logs` rows are retained for data preservation, but new processing does not read or write that table.
 
 ## Google Sheets behavior and quota protection
 
@@ -156,7 +156,8 @@ The migration sequence establishes:
 - atomic email claiming;
 - atomic contact upsert;
 - retryable reset state;
-- a single active run per connection.
+- a single active run per connection;
+- legacy processing RPC retirement while preserving historical `email_logs` data.
 
 Apply the migrations to the configured Supabase project before using the application.
 
