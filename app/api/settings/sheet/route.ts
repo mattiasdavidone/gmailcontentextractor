@@ -176,6 +176,12 @@ export async function POST(req: NextRequest) {
         .limit(1)
         .maybeSingle();
 
+      await supabase
+        .from("linked_spreadsheets")
+        .update({ last_used_at: new Date().toISOString() })
+        .eq("user_id", user.id)
+        .eq("spreadsheet_id", sheetId);
+
       return NextResponse.json({
         sheetId,
         title: linked?.title || "Google Sheet",
@@ -288,6 +294,22 @@ export async function POST(req: NextRequest) {
       );
     }
 
+    if (message.includes("429") || lower.includes("quota")) {
+      return NextResponse.json(
+        {
+          error:
+            "Google Sheets is temporarily rate-limiting this operation. Wait a few seconds and try again.",
+          quotaLimited: true,
+          retryable: true,
+          retryAfterSeconds: 5,
+        },
+        {
+          status: 429,
+          headers: { "Retry-After": "5" },
+        }
+      );
+    }
+
     if (
       lower.includes("permission") ||
       lower.includes("forbidden") ||
@@ -301,19 +323,6 @@ export async function POST(req: NextRequest) {
             ", then paste the full Google Sheets link again.",
         },
         { status: 400 }
-      );
-    }
-
-    if (message.includes("429") || lower.includes("quota")) {
-      return NextResponse.json(
-        {
-          error:
-            "Google Sheets is temporarily rate-limiting the link. Wait a few seconds and try Save again.",
-        },
-        {
-          status: 429,
-          headers: { "Retry-After": "5" },
-        }
       );
     }
 
