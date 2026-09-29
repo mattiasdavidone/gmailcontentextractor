@@ -254,3 +254,55 @@ export async function finishSheetJob(
     throw new Error("SHEET_JOB_OWNERSHIP_LOST");
   }
 }
+
+export async function failRunJobPermanently(
+  supabase: SupabaseClient,
+  jobId: string,
+  workerId: string,
+  errorMessage?: string
+) {
+  const { data, error } = await supabase.rpc(
+    "fail_run_email_job_permanently",
+    {
+      p_job_id: jobId,
+      p_worker_id: workerId,
+      p_error: errorMessage || null,
+    }
+  );
+
+  if (error) {
+    throw new Error(
+      "Could not permanently fail email job: " + error.message
+    );
+  }
+
+  if (data !== true) {
+    throw new Error("RUN_JOB_OWNERSHIP_LOST");
+  }
+}
+
+export async function failSheetJobPermanently(
+  supabase: SupabaseClient,
+  jobId: string,
+  workerId: string,
+  errorMessage?: string
+) {
+  const { data, error } = await supabase.rpc(
+    "fail_run_sheet_job_permanently",
+    {
+      p_job_id: jobId,
+      p_worker_id: workerId,
+      p_error: errorMessage || null,
+    }
+  );
+
+  if (error) {
+    throw new Error(
+      "Could not permanently fail Sheets job: " + error.message
+    );
+  }
+
+  if (data !== true) {
+    throw new Error("SHEET_JOB_OWNERSHIP_LOST");
+  }
+}
