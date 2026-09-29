@@ -3,14 +3,32 @@ import { createClient } from "@supabase/supabase-js";
 import { google } from "googleapis";
 import OpenAI from "openai";
 
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY!
-);
+function getSupabase() {
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-});
+  if (!url || !serviceRoleKey) {
+    throw new Error("Supabase environment variables are not configured.");
+  }
+
+  return createClient(url, serviceRoleKey);
+}
+
+let openaiClient: OpenAI | null = null;
+
+function getOpenAI() {
+  if (!openaiClient) {
+    const apiKey = process.env.OPENAI_API_KEY;
+
+    if (!apiKey) {
+      throw new Error("OPENAI_API_KEY is not configured.");
+    }
+
+    openaiClient = new OpenAI({ apiKey });
+  }
+
+  return openaiClient;
+}
 
 export async function POST(req: NextRequest) {
   // VERIFY CRON SECRET
@@ -20,6 +38,8 @@ export async function POST(req: NextRequest) {
   }
 
   try {
+    const supabase = getSupabase();
+
     // 1. FETCH ALL ACTIVE CONNECTIONS FROM SUPABASE
     const { data: connections, error } = await supabase
       .from("google_connections")
@@ -77,7 +97,7 @@ async function processUserInbox(connection: any) {
     const isHuman = await checkIfSenderIsHuman(fromHeader);
 
     if (!isHuman) {
-      await supabase.from("email_logs").insert({
+      await getSupabase().from("email_logs").insert({
         connection_id: connection.id,
         message_id: msgRef.id,
         status: "bot_filtered",
@@ -110,7 +130,7 @@ async function processUserInbox(connection: any) {
         },
       });
 
-      await supabase.from("extracted_contacts").insert({
+      await getSupabase().from("extracted_contacts").insert({
         connection_id: connection.id,
         email: contact.email || "",
         first_name: contact.first_name,
@@ -121,7 +141,7 @@ async function processUserInbox(connection: any) {
       });
     }
 
-    await supabase.from("email_logs").insert({
+    await getSupabase().from("email_logs").insert({
       connection_id: connection.id,
       message_id: msgRef.id,
       status: "contact_extracted",
@@ -130,7 +150,7 @@ async function processUserInbox(connection: any) {
 }
 
 async function checkIfSenderIsHuman(senderRaw: string): Promise<boolean> {
-  const response = await openai.chat.completions.create({
+  const response = await getOpenAI().chat.completions.create({
     model: "gpt-4o-mini",
     messages: [
       {
@@ -153,7 +173,7 @@ async function extractContactDetails(
   subject: string,
   bodyText: string
 ) {
-  const response = await openai.chat.completions.create({
+  const response = await getOpenAI().chat.completions.create({
     model: "gpt-4o-mini",
     messages: [
       {
