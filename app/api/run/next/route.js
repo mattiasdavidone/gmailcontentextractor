@@ -9,7 +9,6 @@ import {
   extractEmailAddress,
   hasMessageIdInSheet,
   normalizeEmail,
-  withGoogleRetry,
 } from "@/lib/google-sheets";
 
 export const maxDuration = 60;
@@ -396,6 +395,72 @@ async function saveExtractedContact(
   return data;
 }
 
+async function ensureContactWrittenToSheet(
+  supabase,
+  sheets,
+  connection,
+  contact
+) {
+  if (contact.sheet_written) {
+    return connection.target_sheet_tab_id || null;
+  }
+
+  if (!contact.message_id) {
+    throw new Error("Cannot safely recover a contact without its message ID.");
+  }
+
+  const contactsTab = await ensureContactsTab(
+    sheets,
+    connection.target_sheet_id,
+    connection.target_sheet_tab_id,
+    connection.target_sheet_tab_name
+  );
+
+  const alreadyWritten = await hasMessageIdInSheet(
+    sheets,
+    connection.target_sheet_id,
+    contactsTab.title,
+    contact.message_id
+  );
+
+  if (!alreadyWritten) {
+    await appendContact(
+      sheets,
+      connection.target_sheet_id,
+      contactsTab.title,
+      {
+        first_name: contact.first_name,
+        last_name: contact.last_name,
+        email: contact.email,
+        phone: contact.phone,
+        title: contact.title,
+        address: contact.address,
+        source: contact.email || "",
+        message_id: contact.message_id,
+      }
+    );
+  }
+
+  const { error } = await supabase
+    .from("extracted_contacts")
+    .update({
+      sheet_written: true,
+      sheet_written_to:
+        connection.target_sheet_id + ":" + String(contactsTab.tabId),
+    })
+    .eq("id", contact.id)
+    .eq("connection_id", connection.id);
+
+  if (error) {
+    throw new Error(
+      "The contact was written, but its deduplication state could not be saved: " +
+        error.message
+    );
+  }
+
+  return contactsTab.tabId;
+}
+
 async function writeContactToSheet(
   sheets,
   connection,
@@ -665,6 +730,16 @@ export async function POST(req) {
     );
 
     if (knownSenderContact) {
+      if (!knownSenderContact.sheet_written) {
+        stage = "recovering known contact";
+        await ensureContactWrittenToSheet(
+          supabase,
+          sheets,
+          connection,
+          knownSenderContact
+        );
+      }
+
       await setEmailStatus(
         supabase,
         connection.id,
@@ -745,6 +820,16 @@ export async function POST(req) {
     );
 
     if (knownExtractedContact) {
+      if (!knownExtractedContact.sheet_written) {
+        stage = "recovering extracted contact";
+        await ensureContactWrittenToSheet(
+          supabase,
+          sheets,
+          connection,
+          knownExtractedContact
+        );
+      }
+
       await setEmailStatus(
         supabase,
         connection.id,
