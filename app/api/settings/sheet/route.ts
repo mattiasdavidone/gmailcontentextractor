@@ -5,8 +5,31 @@ import { getCurrentUser } from "@/lib/auth";
 
 function getSheetId(value: string) {
   const trimmed = value.trim();
-  const match = trimmed.match(/\/spreadsheets\/d\/([a-zA-Z0-9-_]+)/);
-  return match?.[1] ?? trimmed;
+
+  try {
+    const url = new URL(trimmed);
+
+    if (url.hostname !== "docs.google.com") {
+      return trimmed;
+    }
+
+    const match = url.pathname.match(
+      /^\/spreadsheets\/d\/([a-zA-Z0-9-_]+)(?:\/|$)/
+    );
+
+    return match?.[1] ?? trimmed;
+  } catch {
+    return trimmed;
+  }
+}
+
+function getGoogleError(error: any) {
+  return (
+    error?.response?.data?.error?.message ||
+    error?.errors?.[0]?.message ||
+    error?.message ||
+    "Google Sheets rejected the request."
+  );
 }
 
 export async function POST(req: NextRequest) {
@@ -27,6 +50,18 @@ export async function POST(req: NextRequest) {
   }
 
   const sheetId = getSheetId(input);
+
+  if (
+    !/^[a-zA-Z0-9_-]{20,200}$/.test(sheetId)
+  ) {
+    return NextResponse.json(
+      {
+        error:
+          "That does not look like a valid Google Sheets URL or spreadsheet ID. Paste the full Google Sheets URL.",
+      },
+      { status: 400 }
+    );
+  }
 
   const supabase = createClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -64,22 +99,66 @@ export async function POST(req: NextRequest) {
     "https://docs.google.com/spreadsheets/d/" + sheetId + "/edit";
 
   try {
+    const token = await auth.getAccessToken();
+
+    if (!token.token) {
+      throw new Error(
+        "Google did not return an access token. Reconnect Gmail and approve Google Sheets access."
+      );
+    }
+
     const sheets = google.sheets({ version: "v4", auth });
 
     const spreadsheet = await sheets.spreadsheets.get({
       spreadsheetId: sheetId,
-      fields: "properties(title,spreadsheetId),spreadsheetUrl",
+      fields: "spreadsheetId,spreadsheetUrl,properties(title)",
     });
 
     title = spreadsheet.data.properties?.title || title;
     spreadsheetUrl = spreadsheet.data.spreadsheetUrl || spreadsheetUrl;
   } catch (error) {
+    console.error("Google Sheet lookup failed", {
+      userId: user.id,
+      sheetId,
+      error,
+    });
+
+    const message = getGoogleError(error);
+    const lower = message.toLowerCase();
+
+    if (
+      lower.includes("invalid_grant") ||
+      lower.includes("invalid grant") ||
+      lower.includes("token")
+    ) {
+      return NextResponse.json(
+        {
+          error:
+            "Google authorization is no longer valid. Click Reconnect and approve Gmail and Google Sheets access again.",
+        },
+        { status: 401 }
+      );
+    }
+
+    if (
+      lower.includes("permission") ||
+      lower.includes("forbidden") ||
+      lower.includes("not found")
+    ) {
+      return NextResponse.json(
+        {
+          error:
+            "Google could not access that spreadsheet. Make sure the spreadsheet is owned by or shared with " +
+            (connection.google_email || user.email) +
+            ", then paste the full Google Sheets link again.",
+        },
+        { status: 400 }
+      );
+    }
+
     return NextResponse.json(
       {
-        error:
-          error instanceof Error
-            ? "Could not access that Google Sheet: " + error.message
-            : "Could not access that Google Sheet.",
+        error: "Google Sheets rejected the spreadsheet link: " + message,
       },
       { status: 400 }
     );
