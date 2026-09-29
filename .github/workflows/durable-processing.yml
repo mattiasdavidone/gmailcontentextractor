@@ -1,0 +1,47 @@
+name: Durable processing worker
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: durable-processing-worker
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  advance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Advance active runs
+        env:
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+          APP_URL: https://gmailcontentextractor.vercel.app
+        run: |
+          set -euo pipefail
+
+          if [ -z "${CRON_SECRET}" ]; then
+            echo "CRON_SECRET GitHub secret is not configured."
+            exit 1
+          fi
+
+          end=$(($(date +%s) + 240))
+
+          while [ "$(date +%s)" -lt "${end}" ]; do
+            response=$(curl --fail-with-body --silent --show-error \
+              --max-time 70 \
+              -H "Authorization: Bearer ${CRON_SECRET}" \
+              "${APP_URL}/api/run/cron")
+
+            echo "${response}"
+
+            if echo "${response}" | grep -q '"activeRuns":0'; then
+              exit 0
+            fi
+
+            sleep 20
+          done
