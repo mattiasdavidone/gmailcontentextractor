@@ -78,7 +78,7 @@ async function classifySender(sender) {
       {
         role: "system",
         content:
-          "Analyze the sender email address. Return strictly JSON: {"is_human"}.",
+          'Analyze the sender email address. Return strictly JSON: {"is_human": boolean}.',
       },
       {
         role: "user",
