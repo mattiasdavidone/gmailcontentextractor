@@ -306,10 +306,16 @@ export default function Dashboard() {
           return;
         }
 
-        throw new Error(
+        const extractionError = new Error(
           data.error ||
             `The extraction step failed (HTTP ${response.status}).`
         );
+
+        if (response.status === 429 && data.quotaLimited) {
+          (extractionError as Error & { quotaLimited?: boolean }).quotaLimited = true;
+        }
+
+        throw extractionError;
       }
 
       if (!raw.trim()) {
@@ -355,8 +361,29 @@ export default function Dashboard() {
       const message =
         error instanceof Error ? error.message : "The extraction failed.";
 
+      if (
+        error instanceof Error &&
+        (error as Error & { quotaLimited?: boolean }).quotaLimited
+      ) {
+        const runIdToCancel = runIdRef.current;
+
+        if (runIdToCancel) {
+          void fetch("/api/run/cancel", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ runId: runIdToCancel }),
+          });
+        }
+
+        addActivity(
+          "Google Sheets quota did not recover after retries. The run was stopped safely; no email was marked complete.",
+          "error"
+        );
+      } else {
+        addActivity(message, "error");
+      }
+
       setErrorMessage(message);
-      addActivity(message, "error");
     }
   }
 
