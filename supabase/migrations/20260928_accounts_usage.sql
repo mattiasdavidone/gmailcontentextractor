@@ -91,3 +91,7 @@ alter table public.google_connections
 
 -- Existing log/contact user_id columns are legacy profile references. The new
 -- account-aware run model scopes these records through connection_id/run_id.
+
+
+alter table public.extracted_contacts
+  add column if not exists sheet_written boolean not null default false;
