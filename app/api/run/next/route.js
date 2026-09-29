@@ -61,7 +61,7 @@ function errorMessage(error) {
   }
 }
 
-function parseJson(value | null | undefined) {
+function parseJson(value) {
   if (!value) return {};
 
   try {
@@ -220,18 +220,10 @@ async function markLabel(gmail, messageId, labelId) {
 }
 
 async function appendContact(
-  sheets: ReturnType<typeof google.sheets>,
+  sheets,
   spreadsheetId,
   tabName,
-  contact: {
-    first_name? | null;
-    last_name? | null;
-    email? | null;
-    phone? | null;
-    title? | null;
-    address? | null;
-    source;
-  }
+  contact
 ) {
   const safeTitle = tabName.replace(/'/g, "''");
 
