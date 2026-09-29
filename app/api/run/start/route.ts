@@ -40,7 +40,7 @@ export async function POST() {
 
   const { data: activeRun, error: activeRunError } = await supabase
     .from("tool_runs")
-    .select("id, started_at")
+    .select("id, started_at, last_heartbeat_at, worker_lease_expires_at")
     .eq("user_id", user.id)
     .eq("connection_id", connection.id)
     .eq("status", "running")
@@ -56,8 +56,8 @@ export async function POST() {
   }
 
   if (activeRun) {
-    const startedAt = new Date(activeRun.started_at).getTime();
-    const stale = Date.now() - startedAt > 30 * 60 * 1000;
+    const lastActivity = activeRun.last_heartbeat_at || activeRun.started_at;
+    const stale = Date.now() - new Date(lastActivity).getTime() > 30 * 60 * 1000;
 
     if (!stale) {
       return NextResponse.json(
@@ -74,6 +74,9 @@ export async function POST() {
       .update({
         status: "failed",
         completed_at: new Date().toISOString(),
+        worker_id: null,
+        worker_started_at: null,
+        worker_lease_expires_at: null,
       })
       .eq("id", activeRun.id)
       .eq("user_id", user.id)
@@ -88,6 +91,8 @@ export async function POST() {
       status: "running",
       target_email_count: 1000,
       gmail_query: "in:inbox",
+      ingestion_complete: false,
+      last_heartbeat_at: new Date().toISOString(),
     })
     .select("id")
     .single();
@@ -106,5 +111,5 @@ export async function POST() {
     );
   }
 
-  return NextResponse.json({ runId: run.id });
+  return NextResponse.json({ runId: run.id, targetEmailCount: 1000 });
 }
