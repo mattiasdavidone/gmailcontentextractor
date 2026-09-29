@@ -2,8 +2,18 @@ import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { getCurrentUser } from "@/lib/auth";
 
-export const maxDuration = 30;
 export const dynamic = "force-dynamic";
+
+function getSupabase() {
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+  if (!url || !serviceRoleKey) {
+    throw new Error("Supabase environment variables are not configured.");
+  }
+
+  return createClient(url, serviceRoleKey);
+}
 
 export async function POST() {
   try {
@@ -13,10 +23,7 @@ export async function POST() {
       return NextResponse.json({ error: "AUTH_REQUIRED" }, { status: 401 });
     }
 
-    const supabase = createClient(
-      process.env.NEXT_PUBLIC_SUPABASE_URL!,
-      process.env.SUPABASE_SERVICE_ROLE_KEY!
-    );
+    const supabase = getSupabase();
 
     const { data: connections, error: connectionError } = await supabase
       .from("google_connections")
@@ -26,18 +33,20 @@ export async function POST() {
 
     if (connectionError) {
       throw new Error(
-        "Supabase connection lookup failed: " + connectionError.message
+        "Could not load Gmail connections: " + connectionError.message
       );
     }
 
-    const connectionIds = (connections || []).map((connection) => connection.id);
+    const connectionIds = (connections || [])
+      .map((connection) => connection.id)
+      .filter(Boolean);
 
     if (connectionIds.length === 0) {
       return NextResponse.json({
         success: true,
         emailsReset: 0,
         contactsPreserved: true,
-        message: "No active Gmail connection found.",
+        message: "There is no active Gmail connection to reset.",
       });
     }
 
