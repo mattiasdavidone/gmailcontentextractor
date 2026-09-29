@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { google } from "googleapis";
 import { getCurrentUser } from "@/lib/auth";
+import { isCronRequest } from "@/lib/cron-auth";
 import {
   appendContacts,
   ensureContactsTab,
@@ -51,8 +52,9 @@ function sheetLocation(spreadsheetId: string, tabId: number) {
 }
 
 export async function POST(req: Request) {
-  const user = await getCurrentUser();
-  if (!user) {
+  const cron = isCronRequest(req);
+  const user = cron ? null : await getCurrentUser();
+  if (!cron && !user) {
     return NextResponse.json({ error: "AUTH_REQUIRED" }, { status: 401 });
   }
 
@@ -73,7 +75,6 @@ export async function POST(req: Request) {
         "id, connection_id, status, sheet_queued_count, sheet_completed_count, sheet_failed_count"
       )
       .eq("id", runId)
-      .eq("user_id", user.id)
       .maybeSingle();
 
     if (runError) {
@@ -122,7 +123,6 @@ export async function POST(req: Request) {
         "id, google_email, refresh_token, target_sheet_id, target_sheet_tab_id, target_sheet_tab_name"
       )
       .eq("id", run.connection_id)
-      .eq("user_id", user.id)
       .eq("is_active", true)
       .maybeSingle();
 
