@@ -385,8 +385,6 @@ export default function Dashboard() {
       }
 
       runningRef.current = false;
-      abortRef.current?.abort();
-      abortRef.current = null;
       runIdRef.current = null;
       setRunState("ready");
       setStats(EMPTY_STATS);
