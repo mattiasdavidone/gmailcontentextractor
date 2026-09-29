@@ -153,3 +153,104 @@ export async function markRunIngestionComplete(
     throw new Error("RUN_NOT_ACTIVE");
   }
 }
+
+export async function acquireSheetWorker(
+  supabase: SupabaseClient,
+  runId: string,
+  workerId: string,
+  leaseSeconds = 120
+) {
+  const { data, error } = await supabase.rpc("acquire_run_sheet_worker", {
+    p_run_id: runId,
+    p_worker_id: workerId,
+    p_lease_seconds: leaseSeconds,
+  });
+
+  if (error) {
+    throw new Error("Could not acquire Sheets worker lease: " + error.message);
+  }
+
+  if (data !== true) {
+    throw new Error("SHEET_WORKER_BUSY");
+  }
+}
+
+export async function releaseSheetWorker(
+  supabase: SupabaseClient,
+  runId: string,
+  workerId: string
+) {
+  const { error } = await supabase.rpc("release_run_sheet_worker", {
+    p_run_id: runId,
+    p_worker_id: workerId,
+  });
+
+  if (error) {
+    throw new Error("Could not release Sheets worker lease: " + error.message);
+  }
+}
+
+export async function requeueStaleSheetJobs(
+  supabase: SupabaseClient,
+  runId: string,
+  staleAfterSeconds = 900
+) {
+  const { data, error } = await supabase.rpc("requeue_stale_run_sheet_jobs", {
+    p_run_id: runId,
+    p_stale_after_seconds: staleAfterSeconds,
+  });
+
+  if (error) {
+    throw new Error("Could not requeue stale Sheets jobs: " + error.message);
+  }
+
+  return Number(data || 0);
+}
+
+export async function claimSheetJobs(
+  supabase: SupabaseClient,
+  runId: string,
+  workerId: string,
+  limit = 25
+) {
+  const { data, error } = await supabase.rpc("claim_run_sheet_jobs", {
+    p_run_id: runId,
+    p_worker_id: workerId,
+    p_limit: limit,
+  });
+
+  if (error) {
+    throw new Error("Could not claim Sheets jobs: " + error.message);
+  }
+
+  return (data || []) as Array<{
+    id: string;
+    connection_id: string;
+    contact_id: string;
+    attempts: number;
+    max_attempts: number;
+  }>;
+}
+
+export async function finishSheetJob(
+  supabase: SupabaseClient,
+  jobId: string,
+  workerId: string,
+  status: "completed" | "skipped" | "failed",
+  errorMessage?: string
+) {
+  const { data, error } = await supabase.rpc("finish_run_sheet_job", {
+    p_job_id: jobId,
+    p_worker_id: workerId,
+    p_status: status,
+    p_error: errorMessage || null,
+  });
+
+  if (error) {
+    throw new Error("Could not finish Sheets job: " + error.message);
+  }
+
+  if (data !== true) {
+    throw new Error("SHEET_JOB_OWNERSHIP_LOST");
+  }
+}
