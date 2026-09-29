@@ -1,9 +1,16 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
+import { getCurrentUser } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 
 export async function GET() {
+  const user = await getCurrentUser();
+
+  if (!user) {
+    return NextResponse.json({ error: "AUTH_REQUIRED" }, { status: 401 });
+  }
+
   const supabase = createClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
     process.env.SUPABASE_SERVICE_ROLE_KEY!
@@ -12,6 +19,7 @@ export async function GET() {
   const { data, error } = await supabase
     .from("google_connections")
     .select("google_email, target_sheet_id, is_active")
+    .eq("user_id", user.id)
     .eq("is_active", true)
     .limit(1)
     .maybeSingle();
@@ -25,6 +33,7 @@ export async function GET() {
       connected: Boolean(data),
       email: data?.google_email ?? null,
       sheetId: data?.target_sheet_id ?? null,
+      accountEmail: user.email,
     },
     { headers: { "Cache-Control": "no-store" } }
   );
