@@ -26,7 +26,7 @@ Authentication is implemented with a small application account/session layer in 
 
 ## Processing flow
 
-Each run is started through `/api/run/start`, then Gmail ingestion fills the durable queue through `/api/run/ingest`. The worker state is exposed through `/api/run/status`, and Sheets output is handled by the durable `/api/run/sheets` writer.
+Each run is started through `/api/run/start`. A Vercel Cron tick advances ingestion, Gmail processing, and Sheets output through the durable worker endpoints; the browser only starts/cancels the run and polls `/api/run/status`.
 
 The new processing subsystem:
 
@@ -80,7 +80,10 @@ SUPABASE_SERVICE_ROLE_KEY=...
 GOOGLE_CLIENT_ID=...
 GOOGLE_CLIENT_SECRET=...
 OPENAI_API_KEY=...
+CRON_SECRET=...
 ```
+
+`CRON_SECRET` is a server-side random secret used to authenticate the Vercel Cron worker calls. Vercel recommends using a random value of at least 16 characters for this variable.
 
 The service-role key and Google client secret are server-side secrets. Do not expose them to client-side code or commit them to Git.
 
@@ -172,13 +175,13 @@ The dependency audit evaluates the post-fix vulnerability report and fails when 
 
 The project is configured for Vercel as a Next.js application.
 
-Set all required environment variables in the Vercel project before deploying. Make sure the Google OAuth callback URL matches the deployment hostname.
+Set all required environment variables in the Vercel project before deploying, including `CRON_SECRET`. The repository defines `/api/run/cron` as a once-per-minute scheduler. Vercel permits once-per-minute cron jobs on Pro and Enterprise; Hobby cron jobs are limited to once per day, so a Hobby deployment cannot provide continuous background advancement for a 1,000-message run. Make sure the Google OAuth callback URL matches the deployment hostname.
 
 Vercel can apply deployment/build rate limits independently of GitHub Actions. A successful repository build does not guarantee that a new Vercel deployment can be started immediately.
 
 ## Useful files
 
-`app/page.tsx` — dashboard; it will be wired to the durable worker endpoints in the UI integration phase.
+`app/page.tsx` — dashboard; starts/cancels runs and polls durable status only.
 
 `app/api/run/start/route.ts` — run creation.
 
