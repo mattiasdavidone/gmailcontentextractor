@@ -27,56 +27,61 @@ language plpgsql
 security definer
 set search_path = public
 as $$
+declare
+  v_contact public.extracted_contacts%rowtype;
 begin
   loop
     if nullif(trim(coalesce(p_normalized_email, '')), '') is not null then
-      return query
-      select
-        c.id,
-        c.email,
-        c.first_name,
-        c.last_name,
-        c.phone,
-        c.title,
-        c.address,
-        c.normalized_email,
-        c.sheet_written,
-        c.sheet_written_to,
-        c.message_id
-      from public.extracted_contacts c
-      where c.connection_id = p_connection_id
-        and c.normalized_email = p_normalized_email
-      limit 1;
+      select *
+        into v_contact
+      from public.extracted_contacts
+      where connection_id = p_connection_id
+        and normalized_email = p_normalized_email
+      limit 1
+      for update;
 
       if found then
+        return query select
+          v_contact.id,
+          v_contact.email,
+          v_contact.first_name,
+          v_contact.last_name,
+          v_contact.phone,
+          v_contact.title,
+          v_contact.address,
+          v_contact.normalized_email,
+          v_contact.sheet_written,
+          v_contact.sheet_written_to,
+          v_contact.message_id;
         return;
       end if;
     end if;
 
-    return query
-    select
-      c.id,
-      c.email,
-      c.first_name,
-      c.last_name,
-      c.phone,
-      c.title,
-      c.address,
-      c.normalized_email,
-      c.sheet_written,
-      c.sheet_written_to,
-      c.message_id
-    from public.extracted_contacts c
-    where c.connection_id = p_connection_id
-      and c.message_id = p_message_id
-    limit 1;
+    select *
+      into v_contact
+    from public.extracted_contacts
+    where connection_id = p_connection_id
+      and message_id = p_message_id
+    limit 1
+    for update;
 
     if found then
+      return query select
+        v_contact.id,
+        v_contact.email,
+        v_contact.first_name,
+        v_contact.last_name,
+        v_contact.phone,
+        v_contact.title,
+        v_contact.address,
+        v_contact.normalized_email,
+        v_contact.sheet_written,
+        v_contact.sheet_written_to,
+        v_contact.message_id;
       return;
     end if;
 
     begin
-      return query
       insert into public.extracted_contacts (
         connection_id,
         message_id,
@@ -105,27 +110,30 @@ begin
         false,
         null
       )
-      returning
-        extracted_contacts.id,
-        extracted_contacts.email,
-        extracted_contacts.first_name,
-        extracted_contacts.last_name,
-        extracted_contacts.phone,
-        extracted_contacts.title,
-        extracted_contacts.address,
-        extracted_contacts.normalized_email,
-        extracted_contacts.sheet_written,
-        extracted_contacts.sheet_written_to,
-        extracted_contacts.message_id;
+      returning * into v_contact;
 
+      return query select
+        v_contact.id,
+        v_contact.email,
+        v_contact.first_name,
+        v_contact.last_name,
+        v_contact.phone,
+        v_contact.title,
+        v_contact.address,
+        v_contact.normalized_email,
+        v_contact.sheet_written,
+        v_contact.sheet_written_to,
+        v_contact.message_id;
       return;
     exception
       when unique_violation then
-        -- Another worker won the insert. Loop and return that canonical row.
+        -- A concurrent worker won one of the unique keys. Retry the reads.
+        null;
     end;
   end loop;
 end;
 $$;
+
 
 create or replace function public.claim_email_processing(
   p_connection_id uuid,
