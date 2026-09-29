@@ -174,6 +174,10 @@ export async function POST(req: NextRequest) {
         : null
     );
 
+    if (typeof contactsTab.tabId !== "number") {
+      throw new Error("Google did not return a valid Contacts tab ID.");
+    }
+
     const imported = await importExistingContacts(
       supabase,
       sheets,
