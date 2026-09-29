@@ -100,7 +100,14 @@ export async function getGmailMessagesInBatches(
           userId: "me",
           id,
           format: "metadata",
-          metadataHeaders: ["From", "Subject"],
+          metadataHeaders: [
+            "From",
+            "Subject",
+            "Auto-Submitted",
+            "Precedence",
+            "List-Unsubscribe",
+            "X-Auto-Response-Suppress",
+          ],
         });
 
         return response.data as GmailMessage;
