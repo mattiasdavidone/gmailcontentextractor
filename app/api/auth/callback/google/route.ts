@@ -84,19 +84,21 @@ export async function GET(req: NextRequest) {
     }
 
     if (legacyConnection) {
-      const { error: claimError } = await supabase
+      const { data: claimedConnection, error: claimError } = await supabase
         .from("google_connections")
         .update({
           user_id: user.id,
           refresh_token: tokens.refresh_token,
           is_active: true,
         })
-        .eq("id", legacyConnection.id);
+        .eq("id", legacyConnection.id)
+        .select("id, user_id, google_email")
+        .single();
 
-      if (claimError) {
+      if (claimError || !claimedConnection) {
         throw new Error(
           "Could not attach the Gmail connection to your account: " +
-            claimError.message
+            (claimError?.message || "the updated connection was not returned")
         );
       }
     } else {
@@ -120,18 +122,21 @@ export async function GET(req: NextRequest) {
       }
 
       if (existingConnection) {
-        const { error: updateError } = await supabase
+        const { data: updatedConnection, error: updateError } = await supabase
           .from("google_connections")
           .update({
             refresh_token: tokens.refresh_token,
             is_active: true,
           })
           .eq("id", existingConnection.id)
-          .eq("user_id", user.id);
+          .eq("user_id", user.id)
+          .select("id, user_id, google_email")
+          .single();
 
-        if (updateError) {
+        if (updateError || !updatedConnection) {
           throw new Error(
-            "Could not update the Gmail connection: " + updateError.message
+            "Could not update the Gmail connection: " +
+              (updateError?.message || "the updated connection was not returned")
           );
         }
       } else {
@@ -150,6 +155,29 @@ export async function GET(req: NextRequest) {
           );
         }
       }
+    }
+
+    // Verify the row exists under the signed-in app account before redirecting.
+    const { data: verifiedConnection, error: verifyError } = await supabase
+      .from("google_connections")
+      .select("id, user_id, google_email, is_active")
+      .eq("user_id", user.id)
+      .eq("google_email", googleEmail)
+      .eq("is_active", true)
+      .limit(1)
+      .maybeSingle();
+
+    if (verifyError) {
+      throw new Error(
+        "Gmail was authorized, but the saved connection could not be verified: " +
+          verifyError.message
+      );
+    }
+
+    if (!verifiedConnection) {
+      throw new Error(
+        "Gmail was authorized, but no active connection was saved for your account."
+      );
     }
 
     const successUrl = new URL("/", req.url);
