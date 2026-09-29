@@ -478,7 +478,6 @@ export async function POST(req: Request) {
           .from("google_connections")
           .update({
             is_active: false,
-            refresh_token: null,
           })
           .eq("id", runId ? (await supabase
             .from("tool_runs")
