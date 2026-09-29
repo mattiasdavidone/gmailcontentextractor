@@ -1,4 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
+import { cookies } from "next/headers";
+import { timingSafeEqual } from "crypto";
 import { google } from "googleapis";
 import { createClient } from "@supabase/supabase-js";
 import { getCurrentUser } from "@/lib/auth";
@@ -23,9 +25,29 @@ export async function GET(req: NextRequest) {
   }
 
   const code = req.nextUrl.searchParams.get("code");
+  const returnedState = req.nextUrl.searchParams.get("state");
+  const cookieStore = await cookies();
+  const expectedState = cookieStore.get("gce_google_oauth_state")?.value || "";
+
+  const validState =
+    Boolean(returnedState && expectedState) &&
+    returnedState.length === expectedState.length &&
+    timingSafeEqual(
+      Buffer.from(returnedState || ""),
+      Buffer.from(expectedState || "")
+    );
+
+  cookieStore.delete("gce_google_oauth_state");
 
   if (!code) {
     return redirectWithError(req, "Google did not return an authorization code.");
+  }
+
+  if (!validState) {
+    return redirectWithError(
+      req,
+      "Google authorization could not be verified. Start the connection again."
+    );
   }
 
   const redirectUri = new URL(
