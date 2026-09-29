@@ -74,12 +74,12 @@ export default function Dashboard() {
       window.history.replaceState({}, "", window.location.pathname);
     }
 
-    void loadStatusWithRetry();
+    void loadStatusWithRetry(justConnected);
   }, []);
 
-  async function loadStatusWithRetry() {
+  async function loadStatusWithRetry(justConnected = false) {
     for (let attempt = 0; attempt < 4; attempt += 1) {
-      const result = await loadStatus();
+      const result = await loadStatus(justConnected);
 
       if (result) return;
 
@@ -87,7 +87,7 @@ export default function Dashboard() {
     }
   }
 
-  async function loadStatus() {
+  async function loadStatus(justConnected = false) {
     try {
       const response = await fetch("/api/status", {
         cache: "no-store",
@@ -114,7 +114,7 @@ export default function Dashboard() {
         setSheetSaved(true);
       }
 
-      if (paramsForStatusConnection()) {
+      if (justConnected) {
         if (data.connected) {
           setErrorMessage(null);
           addActivity(
@@ -131,10 +131,6 @@ export default function Dashboard() {
       }
 
       return true;
-
-      function paramsForStatusConnection() {
-        return justConnected;
-      }
     } catch (error) {
       setConnected(false);
       setErrorMessage(
