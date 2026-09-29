@@ -12,6 +12,7 @@ export type GmailMessage = {
   id: string;
   threadId?: string;
   snippet?: string;
+  headers?: Record<string, string>;
   payload?: {
     headers?: Array<{ name?: string | null; value?: string | null }> | null;
   } | null;
@@ -75,6 +76,14 @@ export function normalizeGmailMessage(message: GmailMessage) {
     snippet: message.snippet || "",
     from: getHeader(message, "From"),
     subject: getHeader(message, "Subject"),
+    headers: Object.fromEntries(
+      (message.payload?.headers || [])
+        .filter((header) => header.name && header.value)
+        .map((header) => [
+          String(header.name).toLowerCase(),
+          String(header.value),
+        ])
+    ),
   };
 }
 
