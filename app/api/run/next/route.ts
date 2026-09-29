@@ -4,8 +4,7 @@ import { google } from "googleapis";
 import OpenAI from "openai";
 import { getCurrentUser } from "@/lib/auth";
 import {
-  contactsDataRange,
-  contactsHeaderRange,
+  extractEmailAddress,
   findExistingContactInSpreadsheet,
   getTargetContactsTab,
 } from "@/lib/google-sheets";
@@ -347,10 +346,31 @@ export async function POST(req: Request) {
         });
       }
 
-      if (
-        existingLog.status === "contact_extracted" ||
-        existingLog.status === "contact_already_in_sheet"
-      ) {
+      if (existingLog.status === "contact_already_in_sheet") {
+        const { data: currentRun } = await supabase
+          .from("tool_runs")
+          .select("emails_scanned, bots_filtered, contacts_extracted")
+          .eq("id", runId)
+          .single();
+
+        await supabase
+          .from("tool_runs")
+          .update({
+            emails_scanned: (currentRun?.emails_scanned || 0) + 1,
+          })
+          .eq("id", runId)
+          .eq("user_id", user.id);
+
+        return NextResponse.json({
+          done: false,
+          scanned: 1,
+          botsFiltered: 0,
+          contactsExtracted: 0,
+          activity: `Already in this spreadsheet: ${fromHeader}`,
+        });
+      }
+
+      if (existingLog.status === "contact_extracted") {
         const { data: existingContact, error: existingContactError } =
           await supabase
             .from("extracted_contacts")
@@ -373,8 +393,6 @@ export async function POST(req: Request) {
           );
         }
 
-        let addedToThisSheet = false;
-
         const existingSheetContact = await findExistingContactInSpreadsheet(
           sheets,
           connection.target_sheet_id,
@@ -386,10 +404,9 @@ export async function POST(req: Request) {
           }
         );
 
-        if (
-          !existingSheetContact.found &&
-          existingContact.sheet_written_to !== connection.target_sheet_id
-        ) {
+        let addedToSpreadsheet = false;
+
+        if (!existingSheetContact.found) {
           await assertRunActive(supabase, runId, user.id);
 
           stage = "syncing existing contact to Google Sheet";
@@ -416,7 +433,7 @@ export async function POST(req: Request) {
             .from("extracted_contacts")
             .update({
               sheet_written: true,
-              sheet_written_to: connection.target_sheet_id,
+              sheet_written_to: `${connection.target_sheet_id}:${activeContactsTabId}`,
             })
             .eq("id", existingContact.id)
             .eq("connection_id", connection.id);
@@ -427,10 +444,37 @@ export async function POST(req: Request) {
             );
           }
 
-          addedToThisSheet = true;
+          addedToSpreadsheet = true;
         }
 
         const { data: currentRun } = await supabase
+          .from("tool_runs")
+          .select("emails_scanned, bots_filtered, contacts_extracted")
+          .eq("id", runId)
+          .single();
+
+        await supabase
+          .from("tool_runs")
+          .update({
+            emails_scanned: (currentRun?.emails_scanned || 0) + 1,
+            contacts_extracted:
+              (currentRun?.contacts_extracted || 0) + (addedToSpreadsheet ? 1 : 0),
+          })
+          .eq("id", runId)
+          .eq("user_id", user.id);
+
+        return NextResponse.json({
+          done: false,
+          scanned: 1,
+          botsFiltered: 0,
+          contactsExtracted: addedToSpreadsheet ? 1 : 0,
+          activity: addedToSpreadsheet
+            ? `Added existing contact to Contacts: ${fromHeader}`
+            : `Already in spreadsheet: ${fromHeader}`,
+        });
+      }
+
+      const { data: currentRun } = await supabase
           .from("tool_runs")
           .select("emails_scanned, bots_filtered, contacts_extracted")
           .eq("id", runId)
@@ -688,7 +732,7 @@ export async function POST(req: Request) {
           .from("extracted_contacts")
           .update({
             sheet_written: true,
-            sheet_written_to: connection.target_sheet_id,
+            sheet_written_to: `${connection.target_sheet_id}:${activeContactsTabId}`,
           })
           .eq("id", contact.id)
           .eq("connection_id", connection.id);
