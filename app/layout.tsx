@@ -1,16 +1,16 @@
 import type { Metadata } from "next";
-import { Roboto_Mono } from "next/font/google";
+import { Inter } from "next/font/google";
 import "./globals.css";
 
-const robotoMono = Roboto_Mono({
+const inter = Inter({
   subsets: ["latin"],
-  weight: ["400", "700"],
-  variable: "--font-roboto-mono",
+  weight: ["400", "500"],
+  variable: "--font-inter",
 });
 
 export const metadata: Metadata = {
-  title: "GMAIL CONTACT EXTRACTOR",
-  description: "BRUTALIST AUTOMATED CONTACT EXTRACTION SYSTEM",
+  title: "Gmail Contact Extractor",
+  description: "Extract contacts from Gmail into Google Sheets",
 };
 
 export default function RootLayout({
@@ -20,11 +20,7 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en">
-      <body
-        className={`${robotoMono.variable} font-mono uppercase bg-white text-black min-h-screen antialiased selection:bg-black selection:text-white`}
-      >
-        {children}
-      </body>
+      <body className={`${inter.variable} antialiased`}>{children}</body>
     </html>
   );
 }
