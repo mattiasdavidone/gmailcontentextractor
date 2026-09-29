@@ -1,0 +1,33 @@
+name: Dependency audit
+
+on:
+  push:
+    branches:
+      - fix/post-merge-hardening
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Run npm audit
+        continue-on-error: true
+        run: npm audit --json > audit.json || true
+      - name: Try automatic package-lock fixes
+        run: npm audit fix --package-lock-only --force || true
+      - name: Upload audit and lockfile
+        uses: actions/upload-artifact@v4
+        with:
+          name: npm-audit-fix
+          path: |
+            audit.json
+            package-lock.json
