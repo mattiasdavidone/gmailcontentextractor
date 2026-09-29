@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { google } from "googleapis";
 import { getCurrentUser } from "@/lib/auth";
+import { createContactsTab } from "@/lib/google-sheets";
 
 function getSheetId(value: string) {
   const trimmed = value.trim();
@@ -116,65 +117,10 @@ export async function POST(req: NextRequest) {
 
     title = spreadsheet.data.properties?.title || title;
     spreadsheetUrl = spreadsheet.data.spreadsheetUrl || spreadsheetUrl;
-  } catch (error) {
-    console.error("Google Sheet lookup failed", {
-      userId: user.id,
-      sheetId,
-      error,
-    });
 
-    const message = getGoogleError(error);
-    const lower = message.toLowerCase();
+    const contactsTab = await createContactsTab(sheets, sheetId);
 
-    if (
-      lower.includes("invalid_grant") ||
-      lower.includes("invalid grant") ||
-      lower.includes("token")
-    ) {
-      return NextResponse.json(
-        {
-          error:
-            "Google authorization is no longer valid. Click Reconnect and approve Gmail and Google Sheets access again.",
-        },
-        { status: 401 }
-      );
-    }
-
-    if (
-      lower.includes("permission") ||
-      lower.includes("forbidden") ||
-      lower.includes("not found")
-    ) {
-      return NextResponse.json(
-        {
-          error:
-            "Google could not access that spreadsheet. Make sure the spreadsheet is owned by or shared with " +
-            (connection.google_email || user.email) +
-            ", then paste the full Google Sheets link again.",
-        },
-        { status: 400 }
-      );
-    }
-
-    return NextResponse.json(
-      {
-        error: "Google Sheets rejected the spreadsheet link: " + message,
-      },
-      { status: 400 }
-    );
-  }
-
-  const { error: updateError } = await supabase
-    .from("google_connections")
-    .update({ target_sheet_id: sheetId })
-    .eq("id", connection.id)
-    .eq("user_id", user.id);
-
-  if (updateError) {
-    return NextResponse.json({ error: updateError.message }, { status: 500 });
-  }
-
-  const { error: historyError } = await supabase
+    const { error: historyError } = await supabase
     .from("linked_spreadsheets")
     .upsert(
       {
