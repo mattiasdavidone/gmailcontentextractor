@@ -192,20 +192,78 @@ export async function POST() {
 
     stage = "classifying sender";
 
-    const isHuman = await checkIfSenderIsHuman(fromHeader);
-
     stage = "checking scan label";
 
     const labelId = await getScanLabel(gmail);
 
+    // Make each email step idempotent. If a previous attempt already recorded
+    // this message, do not run OpenAI or append to the Sheet a second time.
+    const { data: existingLog, error: existingLogError } = await supabase
+      .from("email_logs")
+      .select("status")
+      .eq("connection_id", connection.id)
+      .eq("message_id", messageRef.id)
+      .maybeSingle();
+
+    if (existingLogError) {
+      throw new Error(`Could not check email log: ${existingLogError.message}`);
+    }
+
+    if (existingLog?.status) {
+      stage = "finishing previously processed email";
+
+      await gmail.users.messages.modify({
+        userId: "me",
+        id: messageRef.id,
+        requestBody: { addLabelIds: [labelId] },
+      });
+
+      if (existingLog.status === "bot_filtered") {
+        return NextResponse.json({
+          done: false,
+          scanned: 1,
+          botsFiltered: 1,
+          contactsExtracted: 0,
+          activity: `Already filtered: ${fromHeader}`,
+        });
+      }
+
+      if (existingLog.status === "contact_extracted") {
+        return NextResponse.json({
+          done: false,
+          scanned: 1,
+          botsFiltered: 0,
+          contactsExtracted: 1,
+          activity: `Already processed: ${fromHeader}`,
+        });
+      }
+
+      return NextResponse.json({
+        done: false,
+        scanned: 1,
+        botsFiltered: 0,
+        contactsExtracted: 0,
+        activity: `Already processed email: ${fromHeader}`,
+      });
+    }
+
+    stage = "classifying sender";
+
+    const isHuman = await checkIfSenderIsHuman(fromHeader);
+
     if (!isHuman) {
       stage = "recording filtered email";
 
-      const { error: logError } = await supabase.from("email_logs").insert({
-        connection_id: connection.id,
-        message_id: messageRef.id,
-        status: "bot_filtered",
-      });
+      const { error: logError } = await supabase
+        .from("email_logs")
+        .upsert(
+          {
+            connection_id: connection.id,
+            message_id: messageRef.id,
+            status: "bot_filtered",
+          },
+          { onConflict: "connection_id,message_id" }
+        );
 
       if (logError) {
         throw new Error(`Could not write email log: ${logError.message}`);
