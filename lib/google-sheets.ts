@@ -302,9 +302,12 @@ export async function ensureContactsTab(
     };
   }
 
+  const targetSheetId = target.sheetId;
+  const targetSheetTitle = target.title;
+
   if (
-    typeof target.sheetId !== "number" ||
-    typeof target.title !== "string"
+    typeof targetSheetId !== "number" ||
+    typeof targetSheetTitle !== "string"
   ) {
     throw new Error("Google did not return a valid target Contacts tab.");
   }
@@ -312,7 +315,7 @@ export async function ensureContactsTab(
   const header = await withGoogleRetry(() =>
     sheets.spreadsheets.values.get({
       spreadsheetId,
-      range: "'" + escapeSheetTitle(target!.title!) + "'!A1:I1",
+      range: "'" + escapeSheetTitle(targetSheetTitle) + "'!A1:I1",
       majorDimension: "ROWS",
     })
   );
@@ -320,14 +323,14 @@ export async function ensureContactsTab(
   await ensureMessageIdColumn(
     sheets,
     spreadsheetId,
-    target.sheetId!,
-    target.title!,
+    targetSheetId,
+    targetSheetTitle,
     header.data.values?.[0]
   );
 
   return {
-    tabId: target.sheetId,
-    title: target.title,
+    tabId: targetSheetId,
+    title: targetSheetTitle,
     spreadsheetTitle: spreadsheet.data.properties?.title || "Google Sheet",
     spreadsheetUrl:
       spreadsheet.data.spreadsheetUrl ||
