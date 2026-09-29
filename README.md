@@ -21,7 +21,7 @@ The app is a Next.js application using:
 - **Google Sheets API** for linking a destination and writing contacts
 - **OpenAI** for sender classification and contact extraction
 
-Authentication is implemented with a small application account/session layer in `lib/auth.ts`. Session cookies are HTTP-only, signed by an opaque random token, and persisted as SHA-256 token hashes in `user_sessions`.
+Authentication is implemented with a small application account/session layer in `lib/auth.ts`. Session cookies are HTTP-only and contain an opaque random token; only its SHA-256 hash is persisted in `user_sessions`.
 
 ## Processing flow
 
@@ -52,6 +52,7 @@ The current implementation avoids that steady-state pattern:
 - linking a spreadsheet may read its structure and import existing contacts once;
 - normal processing does not scan the spreadsheet for every email;
 - a new contact is appended with one Sheets write;
+- contact values are written as literal `RAW` data rather than interpreted as formulas;
 - only recovery of a previously interrupted write may read the Message ID column;
 - the Google client disables its own automatic Sheets retries;
 - application code retries transient 503 responses with bounded backoff;
