@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { google } from "googleapis";
+import { getCurrentUser } from "@/lib/auth";
 
 export const maxDuration = 60;
 export const dynamic = "force-dynamic";
@@ -25,11 +26,18 @@ function getErrorMessage(error: unknown) {
 
 export async function POST() {
   try {
+    const user = await getCurrentUser();
+
+    if (!user) {
+      return NextResponse.json({ error: "AUTH_REQUIRED" }, { status: 401 });
+    }
+
     const supabase = getSupabase();
 
     const { data: connection, error: connectionError } = await supabase
       .from("google_connections")
       .select("id, refresh_token")
+      .eq("user_id", user.id)
       .eq("is_active", true)
       .limit(1)
       .maybeSingle();
