@@ -264,11 +264,22 @@ export default function Dashboard() {
     abortRef.current?.abort();
     abortRef.current = null;
 
-    const activeRun = activity.find((entry) => entry.message.startsWith("Run started."));
-    void activeRun;
+    const runId = runIdRef.current;
+    runIdRef.current = null;
+
+    if (runId) {
+      void fetch("/api/run/cancel", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ runId }),
+      });
+    }
 
     setRunState("cancelled");
-    addActivity("Run cancelled. The current email may finish before stopping.", "warning");
+    addActivity(
+      "Run cancelled. The current email may finish before stopping.",
+      "warning"
+    );
   }
 
   async function clearScannedStatus() {
@@ -303,6 +314,7 @@ export default function Dashboard() {
       runningRef.current = false;
       abortRef.current?.abort();
       abortRef.current = null;
+      runIdRef.current = null;
       setRunState("ready");
       setStats(EMPTY_STATS);
       setActivity([
