@@ -9,6 +9,55 @@ function getSheetId(value: string) {
   return match?.[1] ?? trimmed;
 }
 
+async function ensureContactsSheet(
+  sheets: ReturnType<typeof google.sheets>,
+  spreadsheetId: string
+) {
+  const spreadsheet = await sheets.spreadsheets.get({
+    spreadsheetId: spreadsheetId,
+    fields: "sheets.properties",
+  });
+
+  const hasContacts = (spreadsheet.data.sheets || []).some(
+    (sheet) => sheet.properties?.title === "Contacts"
+  );
+
+  if (!hasContacts) {
+    await sheets.spreadsheets.batchUpdate({
+      spreadsheetId: spreadsheetId,
+      requestBody: {
+        requests: [
+          {
+            addSheet: {
+              properties: {
+                title: "Contacts",
+              },
+            },
+          },
+        ],
+      },
+    });
+
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: spreadsheetId,
+      range: "Contacts!A1:H1",
+      valueInputOption: "USER_ENTERED",
+      requestBody: {
+        values: [[
+          "First name",
+          "Last name",
+          "Email",
+          "Phone",
+          "Fax",
+          "Title",
+          "Address",
+          "Source",
+        ]],
+      },
+    });
+  }
+}
+
 export async function POST(req: NextRequest) {
   const user = await getCurrentUser();
 
@@ -65,6 +114,8 @@ export async function POST(req: NextRequest) {
 
   try {
     const sheets = google.sheets({ version: "v4", auth });
+    await ensureContactsSheet(sheets, sheetId);
+
     const spreadsheet = await sheets.spreadsheets.get({
       spreadsheetId: sheetId,
       fields: "properties(title,spreadsheetId),spreadsheetUrl",
