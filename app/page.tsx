@@ -153,10 +153,30 @@ export default function Dashboard() {
         signal,
       });
 
-      const data = await response.json();
+      const raw = await response.text();
+      let data: any = {};
+
+      if (raw.trim()) {
+        try {
+          data = JSON.parse(raw);
+        } catch {
+          throw new Error(
+            `The run endpoint returned an invalid response (HTTP ${response.status}).`
+          );
+        }
+      }
 
       if (!response.ok) {
-        throw new Error(data.error || "The extraction step failed.");
+        throw new Error(
+          data.error ||
+            `The extraction step failed (HTTP ${response.status}).`
+        );
+      }
+
+      if (!raw.trim()) {
+        throw new Error(
+          `The run endpoint returned an empty response (HTTP ${response.status}).`
+        );
       }
 
       if (!runningRef.current || signal.aborted) return;
