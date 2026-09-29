@@ -52,9 +52,7 @@ export async function POST(req: NextRequest) {
 
   const sheetId = getSheetId(input);
 
-  if (
-    !/^[a-zA-Z0-9_-]{20,200}$/.test(sheetId)
-  ) {
+  if (!/^[a-zA-Z0-9_-]{20,200}$/.test(sheetId)) {
     return NextResponse.json(
       {
         error:
@@ -118,24 +116,97 @@ export async function POST(req: NextRequest) {
     title = spreadsheet.data.properties?.title || title;
     spreadsheetUrl = spreadsheet.data.spreadsheetUrl || spreadsheetUrl;
 
+    // Every successful Save creates a fresh standardized output tab.
     const contactsTab = await createContactsTab(sheets, sheetId);
 
+    const { error: updateError } = await supabase
+      .from("google_connections")
+      .update({
+        target_sheet_id: sheetId,
+        target_sheet_tab_id: contactsTab.tabId,
+        target_sheet_tab_name: contactsTab.title,
+      })
+      .eq("id", connection.id)
+      .eq("user_id", user.id);
+
+    if (updateError) {
+      throw new Error(
+        "The new Contacts tab was created, but the active tab could not be saved: " +
+          updateError.message
+      );
+    }
+
     const { error: historyError } = await supabase
-    .from("linked_spreadsheets")
-    .upsert(
+      .from("linked_spreadsheets")
+      .upsert(
+        {
+          user_id: user.id,
+          spreadsheet_id: sheetId,
+          title,
+          spreadsheet_url: spreadsheetUrl,
+          last_used_at: new Date().toISOString(),
+        },
+        { onConflict: "user_id,spreadsheet_id" }
+      );
+
+    if (historyError) {
+      throw new Error(
+        "The spreadsheet was linked, but its account history could not be saved: " +
+          historyError.message
+      );
+    }
+
+    return NextResponse.json({
+      sheetId,
+      title,
+      spreadsheetUrl,
+      tabName: contactsTab.title,
+    });
+  } catch (error) {
+    console.error("Google Sheet save failed", {
+      userId: user.id,
+      sheetId,
+      error,
+    });
+
+    const message = getGoogleError(error);
+    const lower = message.toLowerCase();
+
+    if (
+      lower.includes("invalid_grant") ||
+      lower.includes("invalid grant") ||
+      lower.includes("token")
+    ) {
+      return NextResponse.json(
+        {
+          error:
+            "Google authorization is no longer valid. Click Reconnect and approve Gmail and Google Sheets access again.",
+        },
+        { status: 401 }
+      );
+    }
+
+    if (
+      lower.includes("permission") ||
+      lower.includes("forbidden") ||
+      lower.includes("not found")
+    ) {
+      return NextResponse.json(
+        {
+          error:
+            "Google could not access that spreadsheet. Make sure the spreadsheet is owned by or shared with " +
+            (connection.google_email || user.email) +
+            ", then paste the full Google Sheets link again.",
+        },
+        { status: 400 }
+      );
+    }
+
+    return NextResponse.json(
       {
-        user_id: user.id,
-        spreadsheet_id: sheetId,
-        title,
-        spreadsheet_url: spreadsheetUrl,
-        last_used_at: new Date().toISOString(),
+        error: "Google Sheets rejected the spreadsheet link: " + message,
       },
-      { onConflict: "user_id,spreadsheet_id" }
+      { status: 400 }
     );
-
-  if (historyError) {
-    return NextResponse.json({ error: historyError.message }, { status: 500 });
   }
-
-  return NextResponse.json({ sheetId, title, spreadsheetUrl });
 }
