@@ -95,3 +95,7 @@ alter table public.google_connections
 
 alter table public.extracted_contacts
   add column if not exists sheet_written boolean not null default false;
+
+
+alter table public.extracted_contacts
+  add column if not exists sheet_written_to text;
