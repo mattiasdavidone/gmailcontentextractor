@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { google } from "googleapis";
 import OpenAI from "openai";
+import { getCurrentUser } from "@/lib/auth";
 
 export const maxDuration = 60;
 export const dynamic = "force-dynamic";
@@ -106,19 +107,56 @@ function errorMessage(error: unknown) {
   }
 }
 
-export async function POST() {
+export async function POST(req: Request) {
   let stage = "starting";
+  let runId = "";
+
+  const user = await getCurrentUser();
+
+  if (!user) {
+    return NextResponse.json({ error: "AUTH_REQUIRED" }, { status: 401 });
+  }
+
+  const body = await req.json().catch(() => null);
+  runId = typeof body?.runId === "string" ? body.runId : "";
+
+  if (!runId) {
+    return NextResponse.json({ error: "runId is required." }, { status: 400 });
+  }
 
   try {
     const supabase = createSupabase();
 
     stage = "loading Gmail connection";
 
+    const { data: run, error: runError } = await supabase
+      .from("tool_runs")
+      .select("id, connection_id, status")
+      .eq("id", runId)
+      .eq("user_id", user.id)
+      .maybeSingle();
+
+    if (runError) {
+      throw new Error("Could not load run: " + runError.message);
+    }
+
+    if (!run) {
+      return NextResponse.json({ error: "Run not found." }, { status: 404 });
+    }
+
+    if (run.status !== "running") {
+      return NextResponse.json(
+        { error: "This run is no longer active." },
+        { status: 409 }
+      );
+    }
+
     const { data: connection, error: connectionError } = await supabase
       .from("google_connections")
       .select("*")
+      .eq("id", run.connection_id)
+      .eq("user_id", user.id)
       .eq("is_active", true)
-      .limit(1)
       .maybeSingle();
 
     if (connectionError) {
@@ -236,13 +274,21 @@ export async function POST() {
         });
       }
 
+      const { data: currentRun } = await supabase
+        .from("tool_runs")
+        .select("emails_scanned, bots_filtered, contacts_extracted")
+        .eq("id", runId)
+        .single();
+
+      await supabase
+        .from("tool_runs")
+        .update({
+          emails_scanned: (currentRun?.emails_scanned || 0) + 1,
+        })
+        .eq("id", runId)
+        .eq("user_id", user.id);
+
       return NextResponse.json({
-        done: false,
-        scanned: 1,
-        botsFiltered: 0,
-        contactsExtracted: 0,
-        activity: `Already processed email: ${fromHeader}`,
-      });
     }
 
     stage = "classifying sender";
@@ -275,13 +321,22 @@ export async function POST() {
         requestBody: { addLabelIds: [labelId] },
       });
 
+      const { data: currentRun } = await supabase
+        .from("tool_runs")
+        .select("emails_scanned, bots_filtered, contacts_extracted")
+        .eq("id", runId)
+        .single();
+
+      await supabase
+        .from("tool_runs")
+        .update({
+          emails_scanned: (currentRun?.emails_scanned || 0) + 1,
+          bots_filtered: (currentRun?.bots_filtered || 0) + 1,
+        })
+        .eq("id", runId)
+        .eq("user_id", user.id);
+
       return NextResponse.json({
-        done: false,
-        scanned: 1,
-        botsFiltered: 1,
-        contactsExtracted: 0,
-        activity: `Filtered non-human sender: ${fromHeader}`,
-      });
     }
 
     stage = "extracting contact";
@@ -314,6 +369,7 @@ export async function POST() {
       .from("extracted_contacts")
       .insert({
         connection_id: connection.id,
+        run_id: runId,
         email: contact.email || "",
         first_name: contact.first_name,
         last_name: contact.last_name,
@@ -330,6 +386,7 @@ export async function POST() {
 
     const { error: emailLogError } = await supabase.from("email_logs").insert({
       connection_id: connection.id,
+      run_id: runId,
       message_id: messageRef.id,
       status: "contact_extracted",
     });
@@ -346,6 +403,21 @@ export async function POST() {
       requestBody: { addLabelIds: [labelId] },
     });
 
+    const { data: currentRun } = await supabase
+      .from("tool_runs")
+      .select("emails_scanned, bots_filtered, contacts_extracted")
+      .eq("id", runId)
+      .single();
+
+    await supabase
+      .from("tool_runs")
+      .update({
+        emails_scanned: (currentRun?.emails_scanned || 0) + 1,
+        contacts_extracted: (currentRun?.contacts_extracted || 0) + 1,
+      })
+      .eq("id", runId)
+      .eq("user_id", user.id);
+
     return NextResponse.json({
       done: false,
       scanned: 1,
@@ -355,6 +427,20 @@ export async function POST() {
     });
   } catch (error) {
     console.error("Run step failed", { stage, error });
+
+    try {
+      const supabase = createSupabase();
+      if (runId) {
+        await supabase
+          .from("tool_runs")
+          .update({
+            status: "failed",
+            completed_at: new Date().toISOString(),
+          })
+          .eq("id", runId)
+          .eq("user_id", user.id);
+      }
+    } catch {}
 
     return NextResponse.json(
       {
