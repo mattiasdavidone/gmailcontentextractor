@@ -54,6 +54,10 @@ export default function Dashboard() {
   const runIdRef = useRef<string | null>(null);
 
   useEffect(() => {
+    if (window.location.search) {
+      window.history.replaceState({}, "", window.location.pathname);
+    }
+
     void loadStatus();
   }, []);
 
