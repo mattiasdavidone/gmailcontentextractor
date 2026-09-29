@@ -302,6 +302,13 @@ export async function ensureContactsTab(
     };
   }
 
+  if (
+    typeof target.sheetId !== "number" ||
+    typeof target.title !== "string"
+  ) {
+    throw new Error("Google did not return a valid target Contacts tab.");
+  }
+
   const header = await withGoogleRetry(() =>
     sheets.spreadsheets.values.get({
       spreadsheetId,
