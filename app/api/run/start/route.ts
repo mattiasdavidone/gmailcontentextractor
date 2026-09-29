@@ -25,7 +25,10 @@ export async function POST() {
     .maybeSingle();
 
   if (connectionError) {
-    return NextResponse.json({ error: connectionError.message }, { status: 500 });
+    return NextResponse.json(
+      { error: connectionError.message },
+      { status: 500 }
+    );
   }
 
   if (!connection?.target_sheet_id) {
@@ -33,6 +36,48 @@ export async function POST() {
       { error: "Save a Google Sheet before starting a run." },
       { status: 400 }
     );
+  }
+
+  const { data: activeRun, error: activeRunError } = await supabase
+    .from("tool_runs")
+    .select("id, started_at")
+    .eq("user_id", user.id)
+    .eq("connection_id", connection.id)
+    .eq("status", "running")
+    .order("started_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (activeRunError) {
+    return NextResponse.json(
+      { error: activeRunError.message },
+      { status: 500 }
+    );
+  }
+
+  if (activeRun) {
+    const startedAt = new Date(activeRun.started_at).getTime();
+    const stale = Date.now() - startedAt > 30 * 60 * 1000;
+
+    if (!stale) {
+      return NextResponse.json(
+        {
+          error: "A Gmail scan is already running.",
+          runId: activeRun.id,
+        },
+        { status: 409 }
+      );
+    }
+
+    await supabase
+      .from("tool_runs")
+      .update({
+        status: "failed",
+        completed_at: new Date().toISOString(),
+      })
+      .eq("id", activeRun.id)
+      .eq("user_id", user.id)
+      .eq("status", "running");
   }
 
   const { data: run, error } = await supabase
@@ -46,6 +91,13 @@ export async function POST() {
     .single();
 
   if (error || !run) {
+    if (error?.code === "23505") {
+      return NextResponse.json(
+        { error: "A Gmail scan is already running." },
+        { status: 409 }
+      );
+    }
+
     return NextResponse.json(
       { error: error?.message || "Unable to start run." },
       { status: 500 }
