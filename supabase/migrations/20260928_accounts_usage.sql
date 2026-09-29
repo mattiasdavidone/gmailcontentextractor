@@ -71,3 +71,16 @@ alter table public.google_connections
 
 create unique index if not exists google_connections_user_email_key
   on public.google_connections(user_id, google_email);
+
+
+-- Existing google_connections tables may predate the app account migration.
+-- Ensure user_id points at app_users rather than the legacy profiles table.
+alter table public.google_connections
+  drop constraint if exists google_connections_user_id_fkey;
+
+alter table public.google_connections
+  add constraint google_connections_user_id_fkey
+  foreign key (user_id) references public.app_users(id) on delete cascade;
+
+-- Existing log/contact user_id columns are legacy profile references. The new
+-- account-aware run model scopes these records through connection_id/run_id.
