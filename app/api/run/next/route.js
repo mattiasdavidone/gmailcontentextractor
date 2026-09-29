@@ -838,7 +838,7 @@ export async function POST(req) {
       if (!messageContact.sheet_written) {
         stage = "recovering saved contact";
 
-        const sheets = google.sheets({ version: "v4", auth });
+        const sheets = google.sheets({ version: "v4", auth, retry: false });
 
         await writeContactToSheet(
           supabase,
@@ -942,7 +942,7 @@ export async function POST(req) {
       stage = "recovering known contact";
 
       if (!knownContact.sheet_written) {
-        const sheets = google.sheets({ version: "v4", auth });
+        const sheets = google.sheets({ version: "v4", auth, retry: false });
 
         await writeContactToSheet(
           supabase,
@@ -991,7 +991,7 @@ export async function POST(req) {
     // case as a duplicate instead of counting it as a new contact.
     if (savedContact.message_id !== messageId) {
       if (!savedContact.sheet_written) {
-        const sheets = google.sheets({ version: "v4", auth });
+        const sheets = google.sheets({ version: "v4", auth, retry: false });
 
         await writeContactToSheet(
           supabase,
@@ -1029,7 +1029,7 @@ export async function POST(req) {
 
     stage = "writing contact to Google Sheet";
 
-    const sheets = google.sheets({ version: "v4", auth });
+    const sheets = google.sheets({ version: "v4", auth, retry: false });
 
     await writeContactToSheet(
       supabase,
