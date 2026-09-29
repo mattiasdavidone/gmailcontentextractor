@@ -318,12 +318,24 @@ export async function ensureContactsTab(
     })
   );
 
+  const headerValues = header.data.values?.[0];
+
+  if (
+    !isCurrentHeader(headerValues) &&
+    !isLegacyHeader(headerValues) &&
+    normalizedHeader(headerValues).some((value) => value !== "")
+  ) {
+    throw new Error(
+      "The selected Contacts tab has an unexpected header. Select the app's Contacts tab or clear its first row before saving."
+    );
+  }
+
   await ensureMessageIdColumn(
     sheets,
     spreadsheetId,
     targetSheetId,
     targetSheetTitle,
-    header.data.values?.[0]
+    headerValues
   );
 
   return {
