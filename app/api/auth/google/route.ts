@@ -15,34 +15,7 @@ export async function GET(req: NextRequest) {
     req.url
   ).toString();
 
-  const force = req.nextUrl.searchParams.get("force") === "1";
-
-  if (force) {
-    const supabase = createClient(
-      process.env.NEXT_PUBLIC_SUPABASE_URL!,
-      process.env.SUPABASE_SERVICE_ROLE_KEY!
-    );
-
-    const { data: connection } = await supabase
-      .from("google_connections")
-      .select("refresh_token")
-      .eq("user_id", user.id)
-      .eq("is_active", true)
-      .limit(1)
-      .maybeSingle();
-
-    if (connection?.refresh_token) {
-      const revokeClient = new google.auth.OAuth2(
-        process.env.GOOGLE_CLIENT_ID,
-        process.env.GOOGLE_CLIENT_SECRET,
-        redirectUri
-      );
-
-      try {
-        await revokeClient.revokeToken(connection.refresh_token);
-      } catch {}
-    }
-  }
+  // Reconnect uses prompt=consent below to obtain a fresh offline grant.
 
   const oauth2Client = new google.auth.OAuth2(
     process.env.GOOGLE_CLIENT_ID,
