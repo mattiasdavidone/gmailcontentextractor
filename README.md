@@ -5,10 +5,11 @@ Gmail Contact Extractor scans inbox messages, filters obvious non-human senders,
 The current processing model is deliberately database-first:
 
 1. Gmail is the source of messages.
-2. Supabase stores processing state and contact identity.
+2. Supabase stores run state, durable email jobs, Sheets outbox jobs, and contact identity.
 3. Google Sheets is the destination, not the source of truth for deduplication.
-4. A contact is written to Sheets only when it is new for the connected Gmail account or needs recovery after a previous write interrupted.
-5. Gmail labels are not written by the current processor.
+4. Gmail ingestion is paginated and resumable; processing is claim-based and restartable.
+5. Contacts are persisted to Supabase before they are queued for Sheets.
+6. Gmail messages and labels are never modified by the processing subsystem.
 
 ## Architecture
 
@@ -25,23 +26,22 @@ Authentication is implemented with a small application account/session layer in 
 
 ## Processing flow
 
-Each run is started through `/api/run/start`. The client then advances one email at a time through `/api/run/next`.
+Each run is started through `/api/run/start`. A Vercel Cron tick advances ingestion, Gmail processing, and Sheets output through the durable worker endpoints; the browser only starts/cancels the run and polls `/api/run/status`.
 
-For each candidate message, the processor:
+The new processing subsystem:
 
-1. Lists inbox messages from Gmail.
-2. Uses Supabase `email_logs` to find work that is new, failed, or explicitly reset.
-3. Atomically claims the message with the `claim_email_processing` RPC.
-4. Reads only the Gmail message metadata needed for processing.
-5. Checks Supabase for an existing contact.
-6. Classifies the sender with OpenAI.
-7. Skips non-human senders without making a Google Sheets request.
-8. Extracts contact data for human senders.
-9. Deduplicates again through the database.
-10. Writes the contact to the configured Contacts tab when necessary.
-11. Records the final processing status and increments run totals atomically.
+1. Lists Gmail message IDs in pages of up to 500.
+2. Enqueues message IDs into `run_email_jobs` with a unique `(run_id, message_id)` key.
+3. Claims jobs with `FOR UPDATE SKIP LOCKED` and a worker lease.
+4. Reads only the Gmail metadata needed for extraction.
+5. Deterministically rejects obvious automated senders before using OpenAI.
+6. Uses one structured OpenAI analysis call for human classification and contact extraction when needed.
+7. Persists contacts to Supabase before any spreadsheet write.
+8. Queues spreadsheet output in `run_sheet_jobs`.
+9. Writes Sheets rows in bounded batches with durable retry state.
+10. Marks the run complete only when ingestion is closed and all retryable email and Sheets jobs are resolved.
 
-The database functions `claim_email_processing` and `upsert_extracted_contact` are the concurrency controls for this flow.
+The processing subsystem never modifies Gmail messages or labels. The legacy one-email `/api/run/next` endpoint and its old email-processing RPCs have been retired. Historical `email_logs` rows are retained for data preservation, but new processing does not read or write that table.
 
 ## Google Sheets behavior and quota protection
 
@@ -68,7 +68,7 @@ The app currently requests only:
 - `https://www.googleapis.com/auth/spreadsheets`
 - `https://www.googleapis.com/auth/userinfo.email`
 
-The current processor does not modify Gmail messages or labels, so it does not require `gmail.modify`.
+The Gmail processing path is intentionally read-only. It does not request or use `gmail.modify`, label-write scopes, or Gmail mutation endpoints. Google documents `gmail.readonly` as a restricted scope for viewing Gmail messages/settings, while `gmail.modify` grants broader mail access and mutation capabilities.
 
 ## Environment variables
 
@@ -80,7 +80,10 @@ SUPABASE_SERVICE_ROLE_KEY=...
 GOOGLE_CLIENT_ID=...
 GOOGLE_CLIENT_SECRET=...
 OPENAI_API_KEY=...
+CRON_SECRET=...
 ```
+
+`CRON_SECRET` is a server-side random secret used to authenticate the Vercel Cron worker calls. Vercel recommends using a random value of at least 16 characters for this variable.
 
 The service-role key and Google client secret are server-side secrets. Do not expose them to client-side code or commit them to Git.
 
@@ -153,7 +156,8 @@ The migration sequence establishes:
 - atomic email claiming;
 - atomic contact upsert;
 - retryable reset state;
-- a single active run per connection.
+- a single active run per connection;
+- legacy processing RPC retirement while preserving historical `email_logs` data.
 
 Apply the migrations to the configured Supabase project before using the application.
 
@@ -172,15 +176,23 @@ The dependency audit evaluates the post-fix vulnerability report and fails when 
 
 The project is configured for Vercel as a Next.js application.
 
-Set all required environment variables in the Vercel project before deploying. Make sure the Google OAuth callback URL matches the deployment hostname.
+Set all required environment variables in the Vercel project before deploying, including `CRON_SECRET`. The repository defines `/api/run/cron` as a once-per-minute scheduler. Vercel permits once-per-minute cron jobs on Pro and Enterprise; Hobby cron jobs are limited to once per day, so a Hobby deployment cannot provide continuous background advancement for a 1,000-message run. Make sure the Google OAuth callback URL matches the deployment hostname.
 
 Vercel can apply deployment/build rate limits independently of GitHub Actions. A successful repository build does not guarantee that a new Vercel deployment can be started immediately.
 
 ## Useful files
 
-`app/page.tsx` — dashboard and client-side run loop.
+`app/page.tsx` — dashboard; starts/cancels runs and polls durable status only.
 
-`app/api/run/next/route.js` — authoritative email processing path.
+`app/api/run/start/route.ts` — run creation.
+
+`app/api/run/ingest/route.ts` — resumable Gmail ingestion.
+
+`app/api/run/status/route.ts` — durable run progress.
+
+`app/api/run/sheets/route.ts` — durable batched Sheets writer.
+
+`lib/run-worker.ts` — worker lease, claim, retry, and completion helpers.
 
 `lib/google-sheets.ts` — Sheets tab management, quota handling, and contact writes.
 

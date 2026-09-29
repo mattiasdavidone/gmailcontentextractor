@@ -1,19 +1,8 @@
 import { NextResponse } from "next/server";
-import { createClient } from "@supabase/supabase-js";
 import { getCurrentUser } from "@/lib/auth";
+import { createRunDb } from "@/lib/run-worker";
 
 export const dynamic = "force-dynamic";
-
-function getSupabase() {
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-
-  if (!url || !serviceRoleKey) {
-    throw new Error("Supabase environment variables are not configured.");
-  }
-
-  return createClient(url, serviceRoleKey);
-}
 
 export async function POST() {
   try {
@@ -23,7 +12,7 @@ export async function POST() {
       return NextResponse.json({ error: "AUTH_REQUIRED" }, { status: 401 });
     }
 
-    const supabase = getSupabase();
+    const supabase = createRunDb();
 
     const { data: connections, error: connectionError } = await supabase
       .from("google_connections")
@@ -55,6 +44,12 @@ export async function POST() {
       .update({
         status: "cancelled",
         completed_at: new Date().toISOString(),
+        worker_id: null,
+        worker_started_at: null,
+        worker_lease_expires_at: null,
+        sheet_worker_id: null,
+        sheet_worker_started_at: null,
+        sheet_worker_lease_expires_at: null,
       })
       .in("connection_id", connectionIds)
       .eq("status", "running");
@@ -65,48 +60,50 @@ export async function POST() {
       );
     }
 
-    // Preserve processing history for diagnostics and auditing. A reset only
-    // changes completed/failed state back to a retryable marker.
-    const { count, error: resetError } = await supabase
-      .from("email_logs")
-      .update({
-        status: "reset",
-        run_id: null,
-        processed_at: new Date().toISOString(),
-      })
+    // The new processor creates a fresh durable queue for every run.
+    // There is no need to mutate historical email_logs or Gmail labels.
+    // Existing contacts remain the source of truth for deduplication.
+    const { count: queuedJobs, error: jobError } = await supabase
+      .from("run_email_jobs")
+      .select("id", { count: "exact", head: true })
       .in("connection_id", connectionIds)
-      .in("status", [
-        "bot_filtered",
-        "contact_already_in_sheet",
-        "contact_extracted",
-        "failed",
-        "processing",
-      ]);
+      .in("status", ["pending", "processing"]);
 
-    if (resetError) {
+    if (jobError) {
       throw new Error(
-        "Could not reset processing history: " + resetError.message
+        "Could not inspect active processing jobs: " + jobError.message
+      );
+    }
+
+    const { count: sheetJobs, error: sheetJobError } = await supabase
+      .from("run_sheet_jobs")
+      .select("id", { count: "exact", head: true })
+      .in("connection_id", connectionIds)
+      .in("status", ["pending", "processing"]);
+
+    if (sheetJobError) {
+      throw new Error(
+        "Could not inspect active spreadsheet jobs: " +
+          sheetJobError.message
       );
     }
 
     return NextResponse.json({
       success: true,
-      emailsReset: count || 0,
+      emailsReset: (queuedJobs || 0) + (sheetJobs || 0),
       contactsPreserved: true,
       message:
-        count && count > 0
-          ? "Processing history was reset. Existing contacts were preserved, so rerunning will not create duplicate contact rows."
-          : "Processing history was already reset. Existing contacts were preserved.",
+        "Active processing was stopped. The next run will build a fresh Gmail queue, while existing contacts remain preserved for deduplication.",
     });
   } catch (error) {
-    console.error("Reset processing history failed", error);
+    console.error("Reset processing state failed", error);
 
     return NextResponse.json(
       {
         error:
           error instanceof Error
             ? error.message
-            : "Unable to reset processing history.",
+            : "Unable to reset processing state.",
       },
       { status: 500 }
     );

@@ -429,6 +429,73 @@ export function extractEmailAddress(fromHeader: string) {
   return emailMatch ? emailMatch[0].trim().toLowerCase() : "";
 }
 
+export type ContactSheetRow = {
+  first_name?: string | null;
+  last_name?: string | null;
+  email?: string | null;
+  phone?: string | null;
+  fax?: string | null;
+  title?: string | null;
+  address?: string | null;
+  source?: string | null;
+  message_id?: string | null;
+};
+
+export async function readSheetMessageIds(
+  sheets: SheetsClient,
+  spreadsheetId: string,
+  tabName: string
+) {
+  const response = await withGoogleRetry(() =>
+    sheets.spreadsheets.values.get({
+      spreadsheetId,
+      range: contactsMessageIdRange(tabName),
+      majorDimension: "COLUMNS",
+    })
+  );
+
+  return new Set(
+    (response.data.values?.[0] || [])
+      .map((value) => String(value || "").trim())
+      .filter(Boolean)
+  );
+}
+
+/**
+ * Append multiple contact rows in one Sheets write request.
+ * The caller owns retry/reconciliation because append is not idempotent.
+ */
+export async function appendContacts(
+  sheets: SheetsClient,
+  spreadsheetId: string,
+  tabName: string,
+  contacts: ContactSheetRow[]
+) {
+  if (contacts.length === 0) return;
+
+  const safeTitle = tabName.replace(/'/g, "''");
+
+  await sheets.spreadsheets.values.append({
+    spreadsheetId,
+    range: "'" + safeTitle + "'!A:I",
+    valueInputOption: "RAW",
+    insertDataOption: "INSERT_ROWS",
+    requestBody: {
+      values: contacts.map((contact) => [
+        contact.first_name || "",
+        contact.last_name || "",
+        contact.email || "",
+        contact.phone || "",
+        contact.fax || "",
+        contact.title || "",
+        contact.address || "",
+        contact.source || "",
+        contact.message_id || "",
+      ]),
+    },
+  });
+}
+
 export async function appendContact(
   sheets: SheetsClient,
   spreadsheetId: string,
