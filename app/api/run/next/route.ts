@@ -4,6 +4,7 @@ import { google } from "googleapis";
 import OpenAI from "openai";
 
 export const maxDuration = 60;
+export const dynamic = "force-dynamic";
 
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
@@ -14,6 +15,15 @@ function createSupabase() {
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
     process.env.SUPABASE_SERVICE_ROLE_KEY!
   );
+}
+
+function parseModelJson(value: string | null | undefined) {
+  if (!value) return {};
+  try {
+    return JSON.parse(value);
+  } catch {
+    throw new Error("OpenAI returned invalid JSON.");
+  }
 }
 
 async function checkIfSenderIsHuman(senderRaw: string) {
@@ -31,7 +41,7 @@ async function checkIfSenderIsHuman(senderRaw: string) {
     temperature: 0,
   });
 
-  const result = JSON.parse(response.choices[0].message.content || "{}");
+  const result = parseModelJson(response.choices[0]?.message?.content);
   return result.is_human === true;
 }
 
@@ -57,7 +67,7 @@ async function extractContactDetails(
     temperature: 0.1,
   });
 
-  return JSON.parse(response.choices[0].message.content || "{}");
+  return parseModelJson(response.choices[0]?.message?.content);
 }
 
 async function getScanLabel(gmail: any) {
@@ -77,87 +87,202 @@ async function getScanLabel(gmail: any) {
     },
   });
 
+  if (!created.data.id) {
+    throw new Error("Google did not return a label ID for AI-Scanned.");
+  }
+
   return created.data.id;
 }
 
+function errorMessage(error: unknown) {
+  if (error instanceof Error) return error.message;
+
+  if (typeof error === "string") return error;
+
+  try {
+    return JSON.stringify(error);
+  } catch {
+    return "Unknown run error.";
+  }
+}
+
 export async function POST() {
-  const supabase = createSupabase();
+  let stage = "starting";
 
-  const { data: connection, error: connectionError } = await supabase
-    .from("google_connections")
-    .select("*")
-    .eq("is_active", true)
-    .limit(1)
-    .maybeSingle();
+  try {
+    const supabase = createSupabase();
 
-  if (connectionError) {
-    return NextResponse.json({ error: connectionError.message }, { status: 500 });
-  }
+    stage = "loading Gmail connection";
 
-  if (!connection) {
-    return NextResponse.json(
-      { error: "No active Gmail connection found." },
-      { status: 400 }
+    const { data: connection, error: connectionError } = await supabase
+      .from("google_connections")
+      .select("*")
+      .eq("is_active", true)
+      .limit(1)
+      .maybeSingle();
+
+    if (connectionError) {
+      throw new Error(`Supabase connection lookup failed: ${connectionError.message}`);
+    }
+
+    if (!connection) {
+      return NextResponse.json(
+        { error: "No active Gmail connection found." },
+        { status: 400 }
+      );
+    }
+
+    if (!connection.target_sheet_id) {
+      return NextResponse.json(
+        { error: "Save a Google Sheet before starting a run." },
+        { status: 400 }
+      );
+    }
+
+    stage = "authorizing Google APIs";
+
+    const auth = new google.auth.OAuth2(
+      process.env.GOOGLE_CLIENT_ID,
+      process.env.GOOGLE_CLIENT_SECRET
     );
-  }
 
-  if (!connection.target_sheet_id) {
-    return NextResponse.json(
-      { error: "Save a Google Sheet before starting a run." },
-      { status: 400 }
-    );
-  }
+    auth.setCredentials({ refresh_token: connection.refresh_token });
 
-  const auth = new google.auth.OAuth2(
-    process.env.GOOGLE_CLIENT_ID,
-    process.env.GOOGLE_CLIENT_SECRET
-  );
+    const gmail = google.gmail({ version: "v1", auth });
+    const sheets = google.sheets({ version: "v4", auth });
 
-  auth.setCredentials({ refresh_token: connection.refresh_token });
+    stage = "finding next Gmail message";
 
-  const gmail = google.gmail({ version: "v1", auth });
-  const sheets = google.sheets({ version: "v4", auth });
-
-  const listRes = await gmail.users.messages.list({
-    userId: "me",
-    q: "in:inbox -label:AI-Scanned",
-    maxResults: 1,
-  });
-
-  const messageRef = listRes.data.messages?.[0];
-
-  if (!messageRef?.id) {
-    return NextResponse.json({
-      done: true,
-      scanned: 0,
-      botsFiltered: 0,
-      contactsExtracted: 0,
-      activity: "No unprocessed inbox emails found.",
+    const listRes = await gmail.users.messages.list({
+      userId: "me",
+      q: "in:inbox -label:AI-Scanned",
+      maxResults: 1,
     });
-  }
 
-  const msg = await gmail.users.messages.get({
-    userId: "me",
-    id: messageRef.id,
-    format: "full",
-  });
+    const messageRef = listRes.data.messages?.[0];
 
-  const headers = msg.data.payload?.headers || [];
-  const fromHeader =
-    headers.find((h) => h.name?.toLowerCase() === "from")?.value || "";
-  const subject =
-    headers.find((h) => h.name?.toLowerCase() === "subject")?.value || "";
-  const snippet = msg.data.snippet || "";
+    if (!messageRef?.id) {
+      return NextResponse.json({
+        done: true,
+        scanned: 0,
+        botsFiltered: 0,
+        contactsExtracted: 0,
+        activity: "No unprocessed inbox emails found.",
+      });
+    }
 
-  const isHuman = await checkIfSenderIsHuman(fromHeader);
-  const labelId = await getScanLabel(gmail);
+    stage = "reading Gmail message";
 
-  if (!isHuman) {
-    await supabase.from("email_logs").insert({
+    const msg = await gmail.users.messages.get({
+      userId: "me",
+      id: messageRef.id,
+      format: "full",
+    });
+
+    const headers = msg.data.payload?.headers || [];
+    const fromHeader =
+      headers.find((h) => h.name?.toLowerCase() === "from")?.value || "";
+    const subject =
+      headers.find((h) => h.name?.toLowerCase() === "subject")?.value || "";
+    const snippet = msg.data.snippet || "";
+
+    if (!fromHeader) {
+      throw new Error("The Gmail message does not contain a From address.");
+    }
+
+    stage = "classifying sender";
+
+    const isHuman = await checkIfSenderIsHuman(fromHeader);
+
+    stage = "checking scan label";
+
+    const labelId = await getScanLabel(gmail);
+
+    if (!isHuman) {
+      stage = "recording filtered email";
+
+      const { error: logError } = await supabase.from("email_logs").insert({
+        connection_id: connection.id,
+        message_id: messageRef.id,
+        status: "bot_filtered",
+      });
+
+      if (logError) {
+        throw new Error(`Could not write email log: ${logError.message}`);
+      }
+
+      stage = "labeling filtered email";
+
+      await gmail.users.messages.modify({
+        userId: "me",
+        id: messageRef.id,
+        requestBody: { addLabelIds: [labelId] },
+      });
+
+      return NextResponse.json({
+        done: false,
+        scanned: 1,
+        botsFiltered: 1,
+        contactsExtracted: 0,
+        activity: `Filtered non-human sender: ${fromHeader}`,
+      });
+    }
+
+    stage = "extracting contact";
+
+    const contact = await extractContactDetails(fromHeader, subject, snippet);
+
+    stage = "writing contact to Google Sheet";
+
+    await sheets.spreadsheets.values.append({
+      spreadsheetId: connection.target_sheet_id,
+      range: "Contacts!A:H",
+      valueInputOption: "USER_ENTERED",
+      requestBody: {
+        values: [[
+          contact.first_name || "",
+          contact.last_name || "",
+          contact.email || "",
+          contact.phone || "",
+          contact.fax || "",
+          contact.title || "",
+          contact.address || "",
+          "",
+        ]],
+      },
+    });
+
+    stage = "saving extracted contact";
+
+    const { error: contactError } = await supabase
+      .from("extracted_contacts")
+      .insert({
+        connection_id: connection.id,
+        email: contact.email || "",
+        first_name: contact.first_name,
+        last_name: contact.last_name,
+        phone: contact.phone,
+        title: contact.title,
+        address: contact.address,
+      });
+
+    if (contactError) {
+      throw new Error(`Could not save extracted contact: ${contactError.message}`);
+    }
+
+    stage = "recording processed email";
+
+    const { error: emailLogError } = await supabase.from("email_logs").insert({
       connection_id: connection.id,
       message_id: messageRef.id,
-      status: "bot_filtered",
+      status: "contact_extracted",
     });
+
+    if (emailLogError) {
+      throw new Error(`Could not write email log: ${emailLogError.message}`);
+    }
+
+    stage = "labeling processed email";
 
     await gmail.users.messages.modify({
       userId: "me",
@@ -168,59 +293,19 @@ export async function POST() {
     return NextResponse.json({
       done: false,
       scanned: 1,
-      botsFiltered: 1,
-      contactsExtracted: 0,
-      activity: `Filtered non-human sender: ${fromHeader}`,
+      botsFiltered: 0,
+      contactsExtracted: 1,
+      activity: `Extracted contact from: ${fromHeader}`,
     });
+  } catch (error) {
+    console.error("Run step failed", { stage, error });
+
+    return NextResponse.json(
+      {
+        error: `Run failed while ${stage}: ${errorMessage(error)}`,
+        stage,
+      },
+      { status: 500 }
+    );
   }
-
-  const contact = await extractContactDetails(fromHeader, subject, snippet);
-
-  await sheets.spreadsheets.values.append({
-    spreadsheetId: connection.target_sheet_id,
-    range: "Contacts!A:H",
-    valueInputOption: "USER_ENTERED",
-    requestBody: {
-      values: [[
-        contact.first_name || "",
-        contact.last_name || "",
-        contact.email || "",
-        contact.phone || "",
-        contact.fax || "",
-        contact.title || "",
-        contact.address || "",
-        "",
-      ]],
-    },
-  });
-
-  await supabase.from("extracted_contacts").insert({
-    connection_id: connection.id,
-    email: contact.email || "",
-    first_name: contact.first_name,
-    last_name: contact.last_name,
-    phone: contact.phone,
-    title: contact.title,
-    address: contact.address,
-  });
-
-  await supabase.from("email_logs").insert({
-    connection_id: connection.id,
-    message_id: messageRef.id,
-    status: "contact_extracted",
-  });
-
-  await gmail.users.messages.modify({
-    userId: "me",
-    id: messageRef.id,
-    requestBody: { addLabelIds: [labelId] },
-  });
-
-  return NextResponse.json({
-    done: false,
-    scanned: 1,
-    botsFiltered: 0,
-    contactsExtracted: 1,
-    activity: `Extracted contact from: ${fromHeader}`,
-  });
 }
