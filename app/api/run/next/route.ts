@@ -95,6 +95,55 @@ async function getScanLabel(gmail: any) {
   return created.data.id;
 }
 
+async function ensureContactsSheet(
+  sheets: ReturnType<typeof google.sheets>,
+  spreadsheetId: string
+) {
+  const spreadsheet = await sheets.spreadsheets.get({
+    spreadsheetId,
+    fields: "sheets.properties",
+  });
+
+  const hasContacts = (spreadsheet.data.sheets || []).some(
+    (sheet) => sheet.properties?.title === "Contacts"
+  );
+
+  if (!hasContacts) {
+    await sheets.spreadsheets.batchUpdate({
+      spreadsheetId,
+      requestBody: {
+        requests: [
+          {
+            addSheet: {
+              properties: {
+                title: "Contacts",
+              },
+            },
+          },
+        ],
+      },
+    });
+
+    await sheets.spreadsheets.values.update({
+      spreadsheetId,
+      range: "Contacts!A1:H1",
+      valueInputOption: "USER_ENTERED",
+      requestBody: {
+        values: [[
+          "First name",
+          "Last name",
+          "Email",
+          "Phone",
+          "Fax",
+          "Title",
+          "Address",
+          "Source",
+        ]],
+      },
+    });
+  }
+}
+
 function errorMessage(error: unknown) {
   if (error instanceof Error) return error.message;
 
@@ -188,6 +237,9 @@ export async function POST(req: Request) {
 
     const gmail = google.gmail({ version: "v1", auth });
     const sheets = google.sheets({ version: "v4", auth });
+
+    stage = "checking destination spreadsheet";
+    await ensureContactsSheet(sheets, connection.target_sheet_id);
 
     stage = "finding next Gmail message";
 
