@@ -21,6 +21,7 @@ type StatusResponse = {
   connected: boolean;
   email: string | null;
   sheetId: string | null;
+  accountEmail: string;
 };
 
 const EMPTY_STATS: Stats = {
@@ -36,6 +37,7 @@ export default function Dashboard() {
   const [sheetSaved, setSheetSaved] = useState(false);
   const [connected, setConnected] = useState(false);
   const [email, setEmail] = useState<string | null>(null);
+  const [accountEmail, setAccountEmail] = useState("");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [showResetConfirm, setShowResetConfirm] = useState(false);
   const [resetting, setResetting] = useState(false);
@@ -49,6 +51,7 @@ export default function Dashboard() {
 
   const runningRef = useRef(false);
   const abortRef = useRef<AbortController | null>(null);
+  const runIdRef = useRef<string | null>(null);
 
   useEffect(() => {
     void loadStatus();
@@ -67,6 +70,7 @@ export default function Dashboard() {
 
       setConnected(data.connected);
       setEmail(data.email);
+      setAccountEmail(data.accountEmail || "");
 
       if (data.sheetId) {
         setSheetId(data.sheetId);
@@ -138,21 +142,49 @@ export default function Dashboard() {
       return;
     }
 
-    runningRef.current = true;
-    abortRef.current = new AbortController();
-    setRunState("running");
-    setStats(EMPTY_STATS);
-    addActivity("Run started.", "success");
+    try {
+      const startResponse = await fetch("/api/run/start", {
+        method: "POST",
+        cache: "no-store",
+      });
 
-    await processNext(abortRef.current.signal);
+      const startRaw = await startResponse.text();
+      const startData = startRaw ? JSON.parse(startRaw) : {};
+
+      if (!startResponse.ok) {
+        throw new Error(
+          startData.error || "Unable to start the run."
+        );
+      }
+
+      runningRef.current = true;
+      runIdRef.current = startData.runId;
+      abortRef.current = new AbortController();
+      setRunState("running");
+      setStats(EMPTY_STATS);
+      addActivity("Run started.", "success");
+
+      await processNext(abortRef.current.signal, startData.runId);
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Unable to start the run.";
+
+      setRunState("error");
+      setErrorMessage(message);
+      addActivity(message, "error");
+    }
   }
 
-  async function processNext(signal: AbortSignal) {
+  async function processNext(signal: AbortSignal, runId: string) {
     if (!runningRef.current || signal.aborted) return;
 
     try {
       const response = await fetch("/api/run/next", {
         method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ runId }),
         cache: "no-store",
         signal,
       });
@@ -188,6 +220,7 @@ export default function Dashboard() {
       if (data.done) {
         runningRef.current = false;
         abortRef.current = null;
+        runIdRef.current = null;
         setRunState("complete");
         addActivity("Run complete.", "success");
         return;
@@ -207,12 +240,13 @@ export default function Dashboard() {
         );
       }
 
-      await processNext(signal);
+      await processNext(signal, runId);
     } catch (error) {
       if (signal.aborted || !runningRef.current) return;
 
       runningRef.current = false;
       abortRef.current = null;
+      runIdRef.current = null;
       setRunState("error");
 
       const message =
@@ -229,6 +263,9 @@ export default function Dashboard() {
     runningRef.current = false;
     abortRef.current?.abort();
     abortRef.current = null;
+
+    const activeRun = activity.find((entry) => entry.message.startsWith("Run started."));
+    void activeRun;
 
     setRunState("cancelled");
     addActivity("Run cancelled. The current email may finish before stopping.", "warning");
@@ -318,7 +355,25 @@ export default function Dashboard() {
             </p>
           </div>
 
-          <StatusBadge state={runState} />
+          <div className="flex items-center gap-3 text-[12px]">
+            <a
+              href="/account"
+              className="text-[var(--muted)] hover:text-[var(--text)]"
+            >
+              {accountEmail || "Account"}
+            </a>
+            <button
+              onClick={async () => {
+                await fetch("/api/auth/logout", { method: "POST" });
+                window.location.href = "/login";
+              }}
+              className="text-[var(--muted)] hover:text-[var(--text)]"
+            >
+              Sign out
+            </button>
+            <StatusBadge state={runState} />
+          </div>
+
         </header>
 
         <section className="mb-5 rounded-lg border border-[var(--border)] bg-white">
