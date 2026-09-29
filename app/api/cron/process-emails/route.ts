@@ -9,6 +9,6 @@ export async function POST() {
       message:
         "Automated Gmail processing is disabled. Use the dashboard run engine so email processing stays idempotent and cannot race the manual run.",
     },
-    { status: 410 }
+    { status: 200 }
   );
 }
