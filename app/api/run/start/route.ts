@@ -86,6 +86,8 @@ export async function POST() {
       user_id: user.id,
       connection_id: connection.id,
       status: "running",
+      target_email_count: 1000,
+      gmail_query: "in:inbox",
     })
     .select("id")
     .single();
