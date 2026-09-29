@@ -25,14 +25,22 @@ export function hashPassword(password: string) {
 export function verifyPassword(password: string, stored: string) {
   const [salt, expected] = stored.split(":");
 
-  if (!salt || !expected) return false;
+  if (!salt || !expected || !/^[0-9a-f]+$/i.test(expected)) {
+    return false;
+  }
 
-  const actual = scryptSync(password, salt, 64);
+  try {
+    const actual = scryptSync(password, salt, 64);
+    const expectedBytes = Buffer.from(expected, "hex");
 
-  return timingSafeEqual(
-    actual,
-    Buffer.from(expected, "hex")
-  );
+    if (expectedBytes.length !== actual.length) {
+      return false;
+    }
+
+    return timingSafeEqual(actual, expectedBytes);
+  } catch {
+    return false;
+  }
 }
 
 export async function createSession(userId: string) {
