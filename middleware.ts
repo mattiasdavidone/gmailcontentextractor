@@ -9,8 +9,7 @@ export function middleware(request: NextRequest) {
   const publicPath =
     pathname === "/login" ||
     pathname === "/signup" ||
-    pathname.startsWith("/api/auth/") ||
-    pathname.startsWith("/api/cron/");
+    pathname.startsWith("/api/auth/");
 
   if (!token && !publicPath) {
     if (pathname.startsWith("/api/")) {
