@@ -3,6 +3,12 @@ import { createClient } from "@supabase/supabase-js";
 import { google } from "googleapis";
 import OpenAI from "openai";
 import { getCurrentUser } from "@/lib/auth";
+import {
+  contactsDataRange,
+  contactsHeaderRange,
+  findExistingContactInSpreadsheet,
+  getTargetContactsTab,
+} from "@/lib/google-sheets";
 
 export const maxDuration = 60;
 export const dynamic = "force-dynamic";
@@ -93,134 +99,6 @@ async function getScanLabel(gmail: any) {
   }
 
   return created.data.id;
-}
-
-function normalizeEmail(value: string) {
-  return value.trim().toLowerCase();
-}
-
-function extractEmailAddress(fromHeader: string) {
-  const angleMatch = fromHeader.match(/<([^>]+)>/);
-  const raw = angleMatch?.[1] || fromHeader;
-  const emailMatch = raw.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
-  return emailMatch ? normalizeEmail(emailMatch[0]) : "";
-}
-
-function normalizePersonValue(value: string | null | undefined) {
-  return String(value || "")
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, " ");
-}
-
-function normalizePhone(value: string | null | undefined) {
-  return String(value || "").replace(/\D/g, "");
-}
-
-async function findExistingContactInSheet(
-  sheets: ReturnType<typeof google.sheets>,
-  spreadsheetId: string,
-  candidate: {
-    email?: string | null;
-    firstName?: string | null;
-    lastName?: string | null;
-    phone?: string | null;
-  }
-) {
-  const response = await sheets.spreadsheets.values.get({
-    spreadsheetId,
-    range: "Contacts!A2:H",
-    majorDimension: "ROWS",
-  });
-
-  const rows = response.data.values || [];
-  const candidateEmail = normalizeEmail(candidate.email || "");
-  const candidateFirst = normalizePersonValue(candidate.firstName);
-  const candidateLast = normalizePersonValue(candidate.lastName);
-  const candidatePhone = normalizePhone(candidate.phone);
-
-  for (const row of rows) {
-    const rowEmail = normalizeEmail(row[2] || "");
-
-    if (candidateEmail && rowEmail && candidateEmail === rowEmail) {
-      return {
-        found: true,
-        reason: "email" as const,
-      };
-    }
-
-    if (!candidateEmail && candidateFirst && candidateLast) {
-      const rowFirst = normalizePersonValue(row[0]);
-      const rowLast = normalizePersonValue(row[1]);
-      const rowPhone = normalizePhone(row[3]);
-
-      if (
-        rowFirst === candidateFirst &&
-        rowLast === candidateLast &&
-        ((!candidatePhone && !rowPhone) ||
-          (candidatePhone && rowPhone && candidatePhone === rowPhone))
-      ) {
-        return {
-          found: true,
-          reason: "name" as const,
-        };
-      }
-    }
-  }
-
-  return {
-    found: false,
-    reason: null,
-  };
-}
-
-async function ensureContactsSheet(
-  sheets: ReturnType<typeof google.sheets>,
-  spreadsheetId: string
-) {
-  const spreadsheet = await sheets.spreadsheets.get({
-    spreadsheetId,
-    fields: "sheets.properties",
-  });
-
-  const hasContacts = (spreadsheet.data.sheets || []).some(
-    (sheet) => sheet.properties?.title === "Contacts"
-  );
-
-  if (!hasContacts) {
-    await sheets.spreadsheets.batchUpdate({
-      spreadsheetId,
-      requestBody: {
-        requests: [
-          {
-            addSheet: {
-              properties: {
-                title: "Contacts",
-              },
-            },
-          },
-        ],
-      },
-    });
-
-    await sheets.spreadsheets.values.update({
-      spreadsheetId,
-      range: "Contacts!A1:H1",
-      valueInputOption: "USER_ENTERED",
-      requestBody: {
-        values: [[
-          "First name",
-          "Last name",
-          "Email",
-          "Phone",
-          "Fax",
-          "Title",
-          "Address",
-          "Source",
-        ]],
-      },
-    });
-  }
 }
 
 class RunCancelledError extends Error {
@@ -347,9 +225,39 @@ export async function POST(req: Request) {
     const sheets = google.sheets({ version: "v4", auth });
 
     stage = "checking destination spreadsheet";
-    await ensureContactsSheet(sheets, connection.target_sheet_id);
+
+    const targetTab = await getTargetContactsTab(
+      sheets,
+      connection.target_sheet_id,
+      connection.target_sheet_tab_id,
+      connection.target_sheet_tab_name
+    );
+
+    if (
+      connection.target_sheet_tab_id !== targetTab.tabId ||
+      connection.target_sheet_tab_name !== targetTab.title
+    ) {
+      const { error: tabUpdateError } = await supabase
+        .from("google_connections")
+        .update({
+          target_sheet_tab_id: targetTab.tabId,
+          target_sheet_tab_name: targetTab.title,
+        })
+        .eq("id", connection.id)
+        .eq("user_id", user.id);
+
+      if (tabUpdateError) {
+        throw new Error(
+          "Could not save the active Contacts tab: " +
+            tabUpdateError.message
+        );
+      }
+    }
 
     await assertRunActive(supabase, runId, user.id);
+
+    const activeContactsTab = targetTab.title;
+    const activeContactsTabId = targetTab.tabId;
 
     stage = "finding next Gmail message";
 
@@ -467,7 +375,7 @@ export async function POST(req: Request) {
 
         let addedToThisSheet = false;
 
-        const existingSheetContact = await findExistingContactInSheet(
+        const existingSheetContact = await findExistingContactInSpreadsheet(
           sheets,
           connection.target_sheet_id,
           {
@@ -488,7 +396,7 @@ export async function POST(req: Request) {
 
           await sheets.spreadsheets.values.append({
             spreadsheetId: connection.target_sheet_id,
-            range: "Contacts!A:H",
+            range: `'${activeContactsTab.replace(/'/g, "''")}'!A:H`,
             valueInputOption: "USER_ENTERED",
             requestBody: {
               values: [[
@@ -579,7 +487,7 @@ export async function POST(req: Request) {
     const senderEmail = extractEmailAddress(fromHeader);
 
     if (senderEmail) {
-      const existingSheetContact = await findExistingContactInSheet(
+      const existingSheetContact = await findExistingContactInSpreadsheet(
         sheets,
         connection.target_sheet_id,
         { email: senderEmail }
@@ -764,7 +672,7 @@ export async function POST(req: Request) {
 
       stage = "checking Google Sheet for duplicate contact";
 
-      const existingSheetContact = await findExistingContactInSheet(
+      const existingSheetContact = await findExistingContactInSpreadsheet(
         sheets,
         connection.target_sheet_id,
         {
@@ -846,7 +754,7 @@ export async function POST(req: Request) {
 
       await sheets.spreadsheets.values.append({
         spreadsheetId: connection.target_sheet_id,
-        range: "Contacts!A:H",
+        range: `'${activeContactsTab.replace(/'/g, "''")}'!A:H`,
         valueInputOption: "USER_ENTERED",
         requestBody: {
           values: [[
