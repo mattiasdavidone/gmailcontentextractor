@@ -452,55 +452,107 @@ export async function POST(req: Request) {
 
     await assertRunActive(supabase, runId, user.id);
 
-    stage = "extracting contact";
+    stage = "checking saved contact";
 
-    const contact = await extractContactDetails(fromHeader, subject, snippet);
-
-    await assertRunActive(supabase, runId, user.id);
-
-    stage = "writing contact to Google Sheet";
-
-    await sheets.spreadsheets.values.append({
-      spreadsheetId: connection.target_sheet_id,
-      range: "Contacts!A:H",
-      valueInputOption: "USER_ENTERED",
-      requestBody: {
-        values: [[
-          contact.first_name || "",
-          contact.last_name || "",
-          contact.email || "",
-          contact.phone || "",
-          contact.fax || "",
-          contact.title || "",
-          contact.address || "",
-          "",
-        ]],
-      },
-    });
-
-    await assertRunActive(supabase, runId, user.id);
-
-    stage = "saving extracted contact";
-
-    const { error: contactError } = await supabase
+    const { data: savedContact, error: savedContactError } = await supabase
       .from("extracted_contacts")
-      .upsert(
-        {
-          connection_id: connection.id,
-          message_id: messageRef.id,
-          run_id: runId,
-          email: contact.email || "",
-          first_name: contact.first_name,
-          last_name: contact.last_name,
-          phone: contact.phone,
-          title: contact.title,
-          address: contact.address,
-        },
-        { onConflict: "connection_id,message_id" }
+      .select(
+        "id, email, first_name, last_name, phone, title, address, sheet_written"
+      )
+      .eq("connection_id", connection.id)
+      .eq("message_id", messageRef.id)
+      .maybeSingle();
+
+    if (savedContactError) {
+      throw new Error(
+        `Could not check saved contact: ${savedContactError.message}`
+      );
+    }
+
+    let contact = savedContact;
+
+    if (!contact) {
+      await assertRunActive(supabase, runId, user.id);
+
+      stage = "extracting contact";
+
+      const extracted = await extractContactDetails(
+        fromHeader,
+        subject,
+        snippet
       );
 
-    if (contactError) {
-      throw new Error(`Could not save extracted contact: ${contactError.message}`);
+      stage = "saving extracted contact";
+
+      const { data: upsertedContact, error: contactError } = await supabase
+        .from("extracted_contacts")
+        .upsert(
+          {
+            connection_id: connection.id,
+            message_id: messageRef.id,
+            run_id: runId,
+            email: extracted.email || "",
+            first_name: extracted.first_name,
+            last_name: extracted.last_name,
+            phone: extracted.phone,
+            title: extracted.title,
+            address: extracted.address,
+            sheet_written: false,
+          },
+          { onConflict: "connection_id,message_id" }
+        )
+        .select(
+          "id, email, first_name, last_name, phone, title, address, sheet_written"
+        )
+        .single();
+
+      if (contactError || !upsertedContact) {
+        throw new Error(
+          `Could not save extracted contact: ${contactError?.message || "No contact row returned."}`
+        );
+      }
+
+      contact = upsertedContact;
+    }
+
+    if (!contact.sheet_written) {
+      await assertRunActive(supabase, runId, user.id);
+
+      stage = "writing contact to Google Sheet";
+
+      await sheets.spreadsheets.values.append({
+        spreadsheetId: connection.target_sheet_id,
+        range: "Contacts!A:H",
+        valueInputOption: "USER_ENTERED",
+        requestBody: {
+          values: [[
+            contact.first_name || "",
+            contact.last_name || "",
+            contact.email || "",
+            contact.phone || "",
+            "",
+            contact.title || "",
+            contact.address || "",
+            fromHeader,
+          ]],
+        },
+      });
+
+      await assertRunActive(supabase, runId, user.id);
+
+      stage = "marking contact written";
+
+      const { error: markWrittenError } = await supabase
+        .from("extracted_contacts")
+        .update({ sheet_written: true })
+        .eq("id", contact.id)
+        .eq("connection_id", connection.id);
+
+      if (markWrittenError) {
+        throw new Error(
+          `Could not mark contact as written: ${markWrittenError.message}`
+        );
+      }
     }
 
     await assertRunActive(supabase, runId, user.id);
