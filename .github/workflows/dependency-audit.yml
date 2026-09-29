@@ -1,0 +1,25 @@
+name: Dependency audit
+
+on:
+  push:
+    branches:
+      - fix/post-merge-hardening
+  workflow_dispatch:
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Run npm audit
+        continue-on-error: true
+        run: npm audit --json > audit.json || true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: npm-audit
+          path: audit.json
