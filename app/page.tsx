@@ -57,15 +57,17 @@ export default function Dashboard() {
     const params = new URLSearchParams(window.location.search);
     const justConnected = params.get("connected") === "1";
     const googleError = params.get("google_error") === "1";
+    const googleErrorMessage =
+      params.get("google_error_message") ||
+      "Google connection could not be completed. Please try again.";
 
     if (justConnected) {
-      setConnected(true);
-      addActivity("Gmail connected.", "success");
+      addActivity("Gmail authorization completed. Checking the connection...", "success");
     }
 
     if (googleError) {
-      setErrorMessage("Google connection could not be completed. Please try again.");
-      addActivity("Google connection could not be completed.", "error");
+      setErrorMessage(googleErrorMessage);
+      addActivity(googleErrorMessage, "error");
     }
 
     if (window.location.search) {
@@ -112,7 +114,27 @@ export default function Dashboard() {
         setSheetSaved(true);
       }
 
+      if (paramsForStatusConnection()) {
+        if (data.connected) {
+          setErrorMessage(null);
+          addActivity(
+            data.email
+              ? `Gmail connected: ${data.email}`
+              : "Gmail connected.",
+            "success"
+          );
+        } else {
+          setErrorMessage(
+            "Google authorization completed, but the Gmail connection was not saved to your account."
+          );
+        }
+      }
+
       return true;
+
+      function paramsForStatusConnection() {
+        return justConnected;
+      }
     } catch (error) {
       setConnected(false);
       setErrorMessage(
