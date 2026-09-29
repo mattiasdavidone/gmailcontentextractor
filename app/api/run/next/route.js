@@ -152,11 +152,7 @@ async function incrementRun(
   supabase,
   runId,
   userId,
-  delta: {
-    scanned?;
-    filtered?;
-    contacts?;
-  }
+  delta
 ) {
   const { data, error } = await supabase
     .from("tool_runs")
