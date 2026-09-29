@@ -37,6 +37,8 @@ export default function Dashboard() {
   const [connected, setConnected] = useState(false);
   const [email, setEmail] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [showResetConfirm, setShowResetConfirm] = useState(false);
+  const [resetting, setResetting] = useState(false);
   const [activity, setActivity] = useState<Activity[]>([
     {
       id: 1,
@@ -230,23 +232,58 @@ export default function Dashboard() {
     addActivity("Run cancelled. The current email may finish before stopping.", "warning");
   }
 
-  async function restartRun() {
-    runningRef.current = false;
-    abortRef.current?.abort();
-    abortRef.current = null;
+  async function clearScannedStatus() {
+    if (runState === "running" || resetting) return;
 
-    setStats(EMPTY_STATS);
+    setResetting(true);
     setErrorMessage(null);
-    setActivity([
-      {
-        id: Date.now(),
-        time: getTime(),
-        message: "Fresh run initialized.",
-        tone: "success",
-      },
-    ]);
 
-    await beginRun();
+    try {
+      const response = await fetch("/api/reset-scanned", {
+        method: "POST",
+        cache: "no-store",
+      });
+
+      const raw = await response.text();
+      let data: any = {};
+
+      if (raw.trim()) {
+        try {
+          data = JSON.parse(raw);
+        } catch {
+          throw new Error(
+            `The reset endpoint returned an invalid response (HTTP ${response.status}).`
+          );
+        }
+      }
+
+      if (!response.ok) {
+        throw new Error(data.error || `Unable to reset scanned status (HTTP ${response.status}).`);
+      }
+
+      runningRef.current = false;
+      abortRef.current?.abort();
+      abortRef.current = null;
+      setRunState("ready");
+      setStats(EMPTY_STATS);
+      setActivity([
+        {
+          id: Date.now(),
+          time: getTime(),
+          message: data.message || "Scanned status cleared. Ready for a fresh scan.",
+          tone: "warning",
+        },
+      ]);
+      setShowResetConfirm(false);
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Unable to clear scanned status.";
+
+      setErrorMessage(message);
+      addActivity(message, "error");
+    } finally {
+      setResetting(false);
+    }
   }
 
   function clearActivity() {
@@ -287,7 +324,7 @@ export default function Dashboard() {
             <div>
               <h2 className="text-[14px] font-medium">Run controls</h2>
               <p className="mt-1 text-[12px] text-[var(--muted)]">
-                Begin a fresh scan, stop the current run, or restart from the remaining inbox.
+                Begin a scan or stop the current run.
               </p>
             </div>
 
@@ -308,13 +345,6 @@ export default function Dashboard() {
                 Cancel
               </button>
 
-              <button
-                onClick={restartRun}
-                disabled={runState === "running"}
-                className="rounded-md border border-[var(--border)] bg-white px-4 py-2 text-[12px] font-medium transition hover:bg-[var(--surface-muted)]"
-              >
-                Restart
-              </button>
             </div>
           </div>
 
@@ -433,6 +463,63 @@ export default function Dashboard() {
                   </span>
                 </div>
               ))
+            )}
+          </div>
+        </section>
+
+        <section className="mt-8 border-t border-[#ead0d0] pt-5">
+          <div className="rounded-lg border border-[#ead0d0] bg-[#fffafa] px-4 py-3">
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+              <div>
+                <div className="text-[12px] font-medium text-[var(--danger)]">
+                  Clear scanned status
+                </div>
+                <p className="mt-1 max-w-2xl text-[12px] text-[#8f7070]">
+                  This removes the AI-Scanned label from inbox emails and clears their processing history.
+                  They will be eligible to run again, which can increase API and OpenAI costs and may create duplicate rows in the Sheet.
+                </p>
+              </div>
+
+              <button
+                type="button"
+                onClick={() => setShowResetConfirm(true)}
+                disabled={runState === "running" || resetting}
+                className="shrink-0 rounded-md border border-[#d9aaaa] bg-[#fff4f4] px-3 py-2 text-[12px] font-medium text-[var(--danger)] transition hover:bg-[#fce9e9] disabled:cursor-not-allowed disabled:opacity-45"
+              >
+                Clear scanned status
+              </button>
+            </div>
+
+            {showResetConfirm && (
+              <div className="mt-4 border-t border-[#ead0d0] pt-4">
+                <p className="text-[12px] font-medium text-[var(--danger)]">
+                  Are you sure?
+                </p>
+                <p className="mt-1 text-[12px] text-[#8f7070]">
+                  Every inbox email currently marked as scanned will become eligible again.
+                  Processing them again may consume additional API credits and append duplicate contacts to the Sheet.
+                </p>
+
+                <div className="mt-3 flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    onClick={clearScannedStatus}
+                    disabled={resetting}
+                    className="rounded-md border border-[var(--danger)] bg-[var(--danger)] px-3 py-2 text-[12px] font-medium text-white transition hover:opacity-90 disabled:opacity-50"
+                  >
+                    {resetting ? "Clearing..." : "Yes, clear scanned status"}
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setShowResetConfirm(false)}
+                    disabled={resetting}
+                    className="rounded-md border border-[var(--border)] bg-white px-3 py-2 text-[12px] font-medium text-[var(--muted)] transition hover:bg-[var(--surface-muted)]"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
             )}
           </div>
         </section>
