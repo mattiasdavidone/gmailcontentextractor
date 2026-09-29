@@ -464,12 +464,34 @@ async function writeContactToSheet(
       user.id
     );
 
-    const alreadyWritten = await hasMessageIdInSheet(
-      sheets,
-      connection.target_sheet_id,
-      contactsTab.title,
-      contact.message_id
-    );
+    let alreadyWritten = false;
+
+    try {
+      alreadyWritten = await hasMessageIdInSheet(
+        sheets,
+        connection.target_sheet_id,
+        contactsTab.title,
+        contact.message_id
+      );
+    } catch (error) {
+      if (!isMissingSheetError(error)) {
+        throw error;
+      }
+
+      contactsTab = await ensureContactsTab(
+        sheets,
+        connection.target_sheet_id,
+        connection.target_sheet_tab_id,
+        connection.target_sheet_tab_name
+      );
+
+      await saveConnectionTab(
+        supabase,
+        connection.id,
+        user.id,
+        contactsTab
+      );
+    }
 
     if (alreadyWritten) {
       await markContactWritten(
