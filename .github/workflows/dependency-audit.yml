@@ -3,6 +3,7 @@ name: Dependency audit
 on:
   push:
     branches:
+      - main
       - fix/post-merge-hardening
   pull_request:
     branches:
