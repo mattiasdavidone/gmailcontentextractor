@@ -50,6 +50,23 @@ export async function GET(req: NextRequest) {
 
     oauth2Client.setCredentials(tokens);
 
+    // Validate the newly issued offline grant immediately. This catches a
+    // bad/invalid refresh token during OAuth instead of saving a token that
+    // later fails on the first Gmail API request.
+    const refreshed = await oauth2Client.refreshAccessToken();
+    const refreshedTokens = refreshed.credentials;
+    const refreshToken = refreshedTokens.refresh_token || tokens.refresh_token;
+
+    if (!refreshToken) {
+      throw new Error("Google did not return a usable refresh token.");
+    }
+
+    oauth2Client.setCredentials({
+      ...tokens,
+      ...refreshedTokens,
+      refresh_token: refreshToken,
+    });
+
     const oauth2 = google.oauth2({
       version: "v2",
       auth: oauth2Client,
@@ -88,7 +105,7 @@ export async function GET(req: NextRequest) {
         .from("google_connections")
         .update({
           user_id: user.id,
-          refresh_token: tokens.refresh_token,
+          refresh_token: refreshToken,
           is_active: true,
         })
         .eq("id", legacyConnection.id)
@@ -125,7 +142,7 @@ export async function GET(req: NextRequest) {
         const { data: updatedConnection, error: updateError } = await supabase
           .from("google_connections")
           .update({
-            refresh_token: tokens.refresh_token,
+            refresh_token: refreshToken,
             is_active: true,
           })
           .eq("id", existingConnection.id)
@@ -145,7 +162,7 @@ export async function GET(req: NextRequest) {
           .insert({
             user_id: user.id,
             google_email: googleEmail,
-            refresh_token: tokens.refresh_token,
+            refresh_token: refreshToken,
             is_active: true,
           });
 
