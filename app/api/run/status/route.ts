@@ -23,7 +23,7 @@ export async function GET(req: Request) {
   const { data: run, error } = await supabase
     .from("tool_runs")
     .select(
-      "id, status, started_at, completed_at, target_email_count, discovered_message_count, queued_message_count, completed_message_count, failed_message_count, ingestion_complete, last_heartbeat_at, worker_id, worker_lease_expires_at"
+      "id, status, started_at, completed_at, target_email_count, discovered_message_count, queued_message_count, completed_message_count, failed_message_count, sheet_queued_count, sheet_completed_count, sheet_failed_count, ingestion_complete, last_heartbeat_at, worker_id, worker_lease_expires_at, sheet_worker_id, sheet_worker_lease_expires_at"
     )
     .eq("id", runId)
     .eq("user_id", user.id)
@@ -44,6 +44,9 @@ export async function GET(req: Request) {
       queued: Number(run.queued_message_count || 0),
       completed: Number(run.completed_message_count || 0),
       failed: Number(run.failed_message_count || 0),
+      sheetQueued: Number(run.sheet_queued_count || 0),
+      sheetCompleted: Number(run.sheet_completed_count || 0),
+      sheetFailed: Number(run.sheet_failed_count || 0),
       remaining: Math.max(
         0,
         Number(run.queued_message_count || 0) -
