@@ -1,14 +1,21 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
+import { google } from "googleapis";
+import { getCurrentUser } from "@/lib/auth";
 
 function getSheetId(value: string) {
   const trimmed = value.trim();
-
   const match = trimmed.match(/\/spreadsheets\/d\/([a-zA-Z0-9-_]+)/);
   return match?.[1] ?? trimmed;
 }
 
 export async function POST(req: NextRequest) {
+  const user = await getCurrentUser();
+
+  if (!user) {
+    return NextResponse.json({ error: "AUTH_REQUIRED" }, { status: 401 });
+  }
+
   const body = await req.json().catch(() => null);
   const input = typeof body?.sheetId === "string" ? body.sheetId : "";
 
@@ -28,7 +35,8 @@ export async function POST(req: NextRequest) {
 
   const { data: connection, error: lookupError } = await supabase
     .from("google_connections")
-    .select("id")
+    .select("id, google_email, refresh_token")
+    .eq("user_id", user.id)
     .eq("is_active", true)
     .limit(1)
     .maybeSingle();
@@ -44,14 +52,64 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  const { error } = await supabase
-    .from("google_connections")
-    .update({ target_sheet_id: sheetId })
-    .eq("id", connection.id);
+  const auth = new google.auth.OAuth2(
+    process.env.GOOGLE_CLIENT_ID,
+    process.env.GOOGLE_CLIENT_SECRET
+  );
 
-  if (error) {
-    return NextResponse.json({ error: error.message }, { status: 500 });
+  auth.setCredentials({ refresh_token: connection.refresh_token });
+
+  let title = "Google Sheet";
+  let spreadsheetUrl =
+    "https://docs.google.com/spreadsheets/d/" + sheetId + "/edit";
+
+  try {
+    const sheets = google.sheets({ version: "v4", auth });
+    const spreadsheet = await sheets.spreadsheets.get({
+      spreadsheetId: sheetId,
+      fields: "properties(title,spreadsheetId),spreadsheetUrl",
+    });
+
+    title = spreadsheet.data.properties?.title || title;
+    spreadsheetUrl = spreadsheet.data.spreadsheetUrl || spreadsheetUrl;
+  } catch (error) {
+    return NextResponse.json(
+      {
+        error:
+          error instanceof Error
+            ? "Could not access that Google Sheet: " + error.message
+            : "Could not access that Google Sheet.",
+      },
+      { status: 400 }
+    );
   }
 
-  return NextResponse.json({ sheetId });
+  const { error: updateError } = await supabase
+    .from("google_connections")
+    .update({ target_sheet_id: sheetId })
+    .eq("id", connection.id)
+    .eq("user_id", user.id);
+
+  if (updateError) {
+    return NextResponse.json({ error: updateError.message }, { status: 500 });
+  }
+
+  const { error: historyError } = await supabase
+    .from("linked_spreadsheets")
+    .upsert(
+      {
+        user_id: user.id,
+        spreadsheet_id: sheetId,
+        title,
+        spreadsheet_url: spreadsheetUrl,
+        last_used_at: new Date().toISOString(),
+      },
+      { onConflict: "user_id,spreadsheet_id" }
+    );
+
+  if (historyError) {
+    return NextResponse.json({ error: historyError.message }, { status: 500 });
+  }
+
+  return NextResponse.json({ sheetId, title, spreadsheetUrl });
 }
