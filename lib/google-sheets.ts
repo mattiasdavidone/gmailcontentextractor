@@ -267,15 +267,13 @@ export async function ensureContactsTab(
       throw new Error("Google did not return the new Contacts tab.");
     }
 
-    target = {
-      sheetId: properties.sheetId,
-      title: properties.title,
-    };
+    const createdTabId = properties.sheetId;
+    const createdTabTitle = properties.title;
 
     await withGoogleRetry(() =>
       sheets.spreadsheets.values.update({
         spreadsheetId,
-        range: contactsHeaderRange(target!.title!),
+        range: contactsHeaderRange(createdTabTitle),
         valueInputOption: "RAW",
         requestBody: {
           values: [CONTACT_HEADERS],
@@ -286,12 +284,12 @@ export async function ensureContactsTab(
     await finalizeContactsTab(
       sheets,
       spreadsheetId,
-      target.sheetId
+      createdTabId
     );
 
     return {
-      tabId: target.sheetId,
-      title: target.title,
+      tabId: createdTabId,
+      title: createdTabTitle,
       spreadsheetTitle: spreadsheet.data.properties?.title || "Google Sheet",
       spreadsheetUrl:
         spreadsheet.data.spreadsheetUrl ||
