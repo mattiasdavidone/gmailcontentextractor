@@ -317,39 +317,29 @@ async function saveExtractedContact(
 ) {
   const email = normalizeEmail(contact.email || "");
 
-  const payload = {
-    connection_id: connectionId,
-    message_id: messageId,
-    run_id: runId,
-    email,
-    normalized_email: email || null,
-    first_name: contact.first_name || null,
-    last_name: contact.last_name || null,
-    phone: contact.phone || null,
-    title: contact.title || null,
-    address: contact.address || null,
-    sheet_written: false,
-    sheet_written_to: null,
-  };
+  const { data, error } = await supabase.rpc("upsert_extracted_contact", {
+    p_connection_id: connectionId,
+    p_message_id: messageId,
+    p_run_id: runId,
+    p_email: email,
+    p_normalized_email: email || null,
+    p_first_name: contact.first_name || null,
+    p_last_name: contact.last_name || null,
+    p_phone: contact.phone || null,
+    p_title: contact.title || null,
+    p_address: contact.address || null,
+  });
 
-  const { data, error } = await supabase
-    .from("extracted_contacts")
-    .upsert(payload, {
-      onConflict: "connection_id,message_id",
-    })
-    .select(
-      "id, email, first_name, last_name, phone, title, address, normalized_email, sheet_written, sheet_written_to, message_id"
-    )
-    .single();
+  const row = Array.isArray(data) ? data[0] : data;
 
-  if (error || !data) {
+  if (error || !row) {
     throw new Error(
       "Could not save extracted contact: " +
         (error?.message || "No contact row returned.")
     );
   }
 
-  return data;
+  return row;
 }
 
 function isPendingSheetWrite(contact) {
