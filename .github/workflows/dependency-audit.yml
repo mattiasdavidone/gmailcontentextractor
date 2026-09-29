@@ -19,15 +19,27 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
-      - name: Run npm audit
-        continue-on-error: true
-        run: npm audit --json > audit.json || true
-      - name: Try automatic package-lock fixes
+      - name: Capture current audit
+        run: npm audit --json > audit-before-fix.json || true
+      - name: Apply available package-lock fixes
         run: npm audit fix --package-lock-only --force || true
+      - name: Verify remaining vulnerabilities
+        run: |
+          npm audit --json > audit-after-fix.json || true
+          node - <<'NODE'
+          const fs = require("fs");
+          const report = JSON.parse(fs.readFileSync("audit-after-fix.json", "utf8"));
+          const vulns = report.metadata?.vulnerabilities || {};
+          const high = Number(vulns.high || 0);
+          const critical = Number(vulns.critical || 0);
+          console.log({ high, critical, total: vulns.total || 0 });
+          process.exit(high + critical > 0 ? 1 : 0);
+          NODE
       - name: Upload audit and lockfile
         uses: actions/upload-artifact@v4
         with:
           name: npm-audit-fix
           path: |
-            audit.json
+            audit-before-fix.json
+            audit-after-fix.json
             package-lock.json
