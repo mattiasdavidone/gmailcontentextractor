@@ -44,7 +44,6 @@ export default function Dashboard() {
   ]);
 
   const runningRef = useRef(false);
-  const abortRef = useRef<AbortController | null>(null);
   const runIdRef = useRef<string | null>(null);
 
   useEffect(() => {
@@ -72,6 +71,7 @@ export default function Dashboard() {
     }
 
     void loadStatusWithRetry(justConnected);
+    void syncRunState();
   }, []);
 
   async function loadStatusWithRetry(justConnected = false) {
@@ -228,12 +228,13 @@ export default function Dashboard() {
 
       runningRef.current = true;
       runIdRef.current = startData.runId;
-      abortRef.current = new AbortController();
       setRunState("running");
       setStats(EMPTY_STATS);
-      addActivity("Run started.", "success");
-
-      await processNext(abortRef.current.signal, startData.runId);
+      addActivity(
+        "Run queued. Processing continues on the server.",
+        "success"
+      );
+      void refreshRunStatus(startData.runId);
     } catch (error) {
       const message =
         error instanceof Error ? error.message : "Unable to start the run.";
@@ -244,155 +245,94 @@ export default function Dashboard() {
     }
   }
 
-  async function processNext(
-    signal: AbortSignal,
-    runId: string,
-    quotaRetries = 0
-  ) {
-    if (!runningRef.current || signal.aborted) return;
-
+  async function syncRunState() {
     try {
-      const response = await fetch("/api/run/next", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ runId }),
+      const response = await fetch("/api/run/status", {
         cache: "no-store",
-        signal,
+        headers: { "Cache-Control": "no-cache" },
       });
+      const data = await response.json().catch(() => null);
 
-      const raw = await response.text();
-      let data: any = {};
+      if (!response.ok || !data?.run) return;
 
-      if (raw.trim()) {
-        try {
-          data = JSON.parse(raw);
-        } catch {
-          throw new Error(
-            `The run endpoint returned an invalid response (HTTP ${response.status}).`
-          );
-        }
-      }
+      const runId = data.run.id as string;
+      runIdRef.current = runId;
+      setStats(data.stats || EMPTY_STATS);
 
-      if (!response.ok) {
-        if (
-          response.status === 429 &&
-          data.retryable &&
-          quotaRetries < 3
-        ) {
-          const retryAfterSeconds = Math.max(
-            1,
-            Math.min(30, Number(data.retryAfterSeconds) || 15)
-          );
-
-          addActivity(
-            `Google is rate-limiting the run. Retrying in ${retryAfterSeconds}s...`,
-            "warning"
-          );
-
-          await new Promise((resolve) =>
-            setTimeout(resolve, retryAfterSeconds * 1000)
-          );
-
-          if (!runningRef.current || signal.aborted) return;
-
-          await processNext(signal, runId, quotaRetries + 1);
-          return;
-        }
-
-        const extractionError = new Error(
-          data.error ||
-            `The extraction step failed (HTTP ${response.status}).`
-        );
-
-        if (response.status === 429 && data.quotaLimited) {
-          (extractionError as Error & { quotaLimited?: boolean }).quotaLimited =
-            true;
-        }
-
-        throw extractionError;
-      }
-
-      if (!raw.trim()) {
-        throw new Error(
-          `The run endpoint returned an empty response (HTTP ${response.status}).`
-        );
-      }
-
-      if (!runningRef.current || signal.aborted) return;
-
-      if (data.done) {
+      if (data.run.status === "running") {
+        runningRef.current = true;
+        setRunState("running");
+        addActivity("Active run resumed.", "normal");
+      } else {
         runningRef.current = false;
-        abortRef.current = null;
-        runIdRef.current = null;
-        setRunState("complete");
-        addActivity("Run complete.", "success");
+        setRunState(
+          data.run.status === "completed"
+            ? "complete"
+            : data.run.status === "cancelled"
+              ? "cancelled"
+              : data.run.status === "failed"
+                ? "error"
+                : "ready"
+        );
+      }
+    } catch {
+      // The normal polling path will retry on the next interval.
+    }
+  }
+
+  async function refreshRunStatus(runId: string) {
+    try {
+      const response = await fetch(
+        `/api/run/status?runId=${encodeURIComponent(runId)}`,
+        {
+          cache: "no-store",
+          headers: { "Cache-Control": "no-cache" },
+        }
+      );
+      const data = await response.json().catch(() => null);
+
+      if (!response.ok || !data?.run) return;
+
+      setStats(data.stats || EMPTY_STATS);
+
+      if (data.run.status === "running") {
+        runningRef.current = true;
         return;
       }
 
-      setStats((current) => ({
-        totalScanned: current.totalScanned + (data.scanned || 0),
-        botsFiltered: current.botsFiltered + (data.botsFiltered || 0),
-        contactsExtracted:
-          current.contactsExtracted + (data.contactsExtracted || 0),
-      }));
-
-      if (data.activity) {
-        addActivity(
-          data.activity,
-          data.botsFiltered
-            ? "warning"
-            : data.contactsExtracted
-              ? "success"
-              : "normal"
-        );
-      }
-
-      await processNext(signal, runId);
-    } catch (error) {
-      if (signal.aborted || !runningRef.current) return;
-
-      const activeRunId = runIdRef.current;
       runningRef.current = false;
-      abortRef.current = null;
       runIdRef.current = null;
-      setRunState("error");
 
-      const isQuotaLimited =
-        error instanceof Error &&
-        (error as Error & { quotaLimited?: boolean }).quotaLimited;
-
-      if (isQuotaLimited) {
-        if (activeRunId) {
-          await fetch("/api/run/cancel", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ runId: activeRunId }),
-          }).catch(() => undefined);
-        }
-
-        const safeMessage =
-          "Google Sheets is rate-limiting requests. The run was stopped safely. Wait about a minute before trying again.";
-
-        addActivity(safeMessage, "error");
-        setErrorMessage(safeMessage);
-      } else {
-        const message =
-          error instanceof Error ? error.message : "The extraction failed.";
-
-        addActivity(message, "error");
-        setErrorMessage(message);
+      if (data.run.status === "completed") {
+        setRunState("complete");
+        addActivity("Run complete. Contacts are queued/written independently.", "success");
+      } else if (data.run.status === "cancelled") {
+        setRunState("cancelled");
+      } else if (data.run.status === "failed") {
+        setRunState("error");
+        setErrorMessage("The run stopped after exhausting its retry policy.");
+        addActivity("Run failed after retryable work was exhausted.", "error");
       }
+    } catch {
+      // Keep the UI running; durable processing continues server-side.
     }
   }
+
+  useEffect(() => {
+    if (runState !== "running") return;
+
+    const timer = window.setInterval(() => {
+      const runId = runIdRef.current;
+      if (runId) void refreshRunStatus(runId);
+    }, 2500);
+
+    return () => window.clearInterval(timer);
+  }, [runState]);
 
   function cancelRun() {
     if (!runningRef.current) return;
 
     runningRef.current = false;
-    abortRef.current?.abort();
-    abortRef.current = null;
 
     const runId = runIdRef.current;
     runIdRef.current = null;
@@ -407,7 +347,7 @@ export default function Dashboard() {
 
     setRunState("cancelled");
     addActivity(
-      "Run stopped. The current email may finish before stopping.",
+      "Run stopped. Queued work will no longer be advanced.",
       "warning"
     );
   }
