@@ -30,14 +30,18 @@ type ContactRow = {
 
 export function isGoogleQuotaError(error: unknown) {
   const code = Number(
-    (error as any)?.code ?? (error as any)?.response?.status ?? 0
+    (error as any)?.code ??
+      (error as any)?.response?.status ??
+      (error as any)?.status ??
+      0
   );
+
   return code === 429 || code === 503;
 }
 
 export async function withGoogleRetry<T>(
   operation: () => Promise<T>,
-  retries = 3
+  retries = 4
 ): Promise<T> {
   let attempt = 0;
 
@@ -52,16 +56,22 @@ export async function withGoogleRetry<T>(
           0
       );
 
-      // Google API clients already retry quota 429s internally. Retrying a
-      // 429 again here can amplify the quota problem. Handle 429 at the
-      // email/run level instead; only retry transient 503 responses here.
-      if (attempt >= retries || status !== 503) {
+      const retryable = status === 429 || status === 503;
+
+      if (attempt >= retries || !retryable) {
         throw error;
       }
 
+      const retryAfterHeader =
+        (error as any)?.response?.headers?.["retry-after"] ??
+        (error as any)?.response?.headers?.["Retry-After"];
+
+      const retryAfterSeconds = Number(retryAfterHeader);
       const delay =
-        Math.min(4_000, 400 * 2 ** attempt) +
-        Math.floor(Math.random() * 250);
+        Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0
+          ? Math.min(60_000, retryAfterSeconds * 1_000)
+          : Math.min(16_000, 1_000 * 2 ** attempt) +
+            Math.floor(Math.random() * 1_000);
 
       await new Promise((resolve) => setTimeout(resolve, delay));
       attempt += 1;
@@ -240,7 +250,7 @@ export async function ensureContactsTab(
 
   const namedContacts = tabs.find((tab) => tab.title === "Contacts");
 
-  let target =
+  const target =
     targetById?.sheetId != null && targetById.title
       ? targetById
       : targetByName?.sheetId != null && targetByName.title
@@ -291,11 +301,7 @@ export async function ensureContactsTab(
       })
     );
 
-    await finalizeContactsTab(
-      sheets,
-      spreadsheetId,
-      createdTabId
-    );
+    await finalizeContactsTab(sheets, spreadsheetId, createdTabId);
 
     return {
       tabId: createdTabId,
