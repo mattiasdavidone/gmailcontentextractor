@@ -159,62 +159,15 @@ export async function POST(req: Request) {
     }
 
     const { gmail } = createGmailClient(connection.refresh_token);
+    const messageResults = await getGmailMessagesInBatches(
+      gmail,
+      jobs.map((job) => job.message_id),
+      JOB_BATCH_SIZE
+    );
 
-    let messagesById = new Map<
-      string,
-      Awaited<ReturnType<typeof getGmailMessagesInBatches>>[number]
-    >();
-
-    try {
-      const messages = await getGmailMessagesInBatches(
-        gmail,
-        jobs.map((job) => job.message_id),
-        JOB_BATCH_SIZE
-      );
-      messagesById = new Map(messages.map((message) => [message.id, message]));
-    } catch (error) {
-      const decision = classifyProcessingError(error);
-      const errorText = messageOf(error);
-
-      await Promise.all(
-        jobs.map(async (job) => {
-          try {
-            if (decision.permanent) {
-              await failRunJobPermanently(
-                supabase,
-                job.id,
-                workerId,
-                errorText
-              );
-            } else {
-              await finishRunJob(
-                supabase,
-                job.id,
-                workerId,
-                "failed",
-                errorText
-              );
-            }
-          } catch (finishError) {
-            console.error("Unable to record Gmail fetch failure", {
-              jobId: job.id,
-              finishError,
-            });
-          }
-        })
-      );
-
-      return NextResponse.json({
-        ok: true,
-        processed: 0,
-        filtered: 0,
-        contacts: 0,
-        failed: jobs.length,
-        retryableFailures: decision.retryable ? jobs.length : 0,
-        permanentFailures: decision.permanent ? jobs.length : 0,
-        retryReason: decision.reason,
-      });
-    }
+    const messagesById = new Map(
+      messageResults.map((result) => [result.id, result])
+    );
 
     let processed = 0;
     let filtered = 0;
@@ -225,11 +178,57 @@ export async function POST(req: Request) {
       await heartbeatRun(supabase, runId, workerId).catch(() => undefined);
 
       try {
-        const message = messagesById.get(job.message_id);
+        const messageResult = messagesById.get(job.message_id);
+
+        if (!messageResult) {
+          await failRunJobPermanently(
+            supabase,
+            job.id,
+            workerId,
+            "Gmail fetch result was missing."
+          );
+          processed += 1;
+          errors.push({
+            jobId: job.id,
+            retryable: false,
+            reason: "missing_fetch_result",
+          });
+          continue;
+        }
+
+        if (messageResult.error) {
+          const decision = classifyProcessingError(messageResult.error);
+          const errorText = messageOf(messageResult.error);
+
+          if (decision.permanent) {
+            await failRunJobPermanently(
+              supabase,
+              job.id,
+              workerId,
+              errorText
+            );
+            processed += 1;
+          } else {
+            await finishRunJob(
+              supabase,
+              job.id,
+              workerId,
+              "failed",
+              errorText
+            );
+          }
+
+          errors.push({
+            jobId: job.id,
+            retryable: decision.retryable,
+            reason: decision.reason,
+          });
+          continue;
+        }
+
+        const message = messageResult.message;
 
         if (!message) {
-          const error = new Error("Gmail message could not be loaded.");
-          const decision = classifyProcessingError(error);
           await failRunJobPermanently(
             supabase,
             job.id,
@@ -240,7 +239,7 @@ export async function POST(req: Request) {
           errors.push({
             jobId: job.id,
             retryable: false,
-            reason: decision.reason,
+            reason: "missing_message",
           });
           continue;
         }
@@ -375,6 +374,10 @@ export async function POST(req: Request) {
             "failed",
             errorText
           );
+        }
+
+        if (decision.permanent) {
+          processed += 1;
         }
 
         errors.push({
